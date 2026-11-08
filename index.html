@@ -3,28 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#f4f6f4">
-  <title>Quản lý công việc của Minh</title>
+  <meta name="theme-color" content="#f5f7fa">
+  <title>Minh Work · Quản lý Đơn hàng & Dòng tiền</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="brand" onclick="setView('overview', document.querySelector('[data-view=overview]'))" role="button" tabindex="0" aria-label="Về trang tổng quan">
+      <div class="brand" onclick="setView('overview', document.querySelector('[data-view=overview]'))" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setView('overview', document.querySelector('[data-view=overview]'));}" role="button" tabindex="0" aria-label="Về trang tổng quan">
         <div class="brandmark">M</div>
         <div class="brandname">
           <span>Minh Work</span>
-          <small>Vận đơn · Mua hộ · Thu chi</small>
+          <small id="today">Quản lý đơn & dòng tiền</small>
         </div>
       </div>
       <div class="topright">
-        <span class="today" id="today"></span>
+        <span class="save-status" id="saveStatus" title="Dữ liệu tự động lưu trên trình duyệt này">✓ Đã lưu tự động</span>
         <div class="data-tools">
-          <button type="button" class="btn subtle small" onclick="document.getElementById('importFile').click()" title="Khôi phục dữ liệu từ tệp JSON">
-            <span aria-hidden="true">↑</span> Khôi phục
+          <button type="button" class="btn subtle small" onclick="openHistoryTab()" title="Xem lịch sử mọi lần chỉnh sửa">
+            🕒 Lịch sử
           </button>
-          <button type="button" class="btn subtle small" onclick="exportData()" title="Tải bản sao lưu dữ liệu JSON về máy">
-            <span aria-hidden="true">↓</span> Sao lưu
+          <button type="button" class="btn subtle small" onclick="document.getElementById('importFile').click()" title="Khôi phục dữ liệu từ tệp JSON">
+            ↑ Khôi phục
+          </button>
+          <button type="button" class="btn subtle small" onclick="exportData()" title="Tải tệp sao lưu JSON về máy">
+            ↓ Sao lưu
           </button>
           <input id="importFile" class="hidden" type="file" accept="application/json" onchange="importData(event)">
         </div>
@@ -33,45 +36,43 @@
   </header>
 
   <div class="shell">
-    <aside class="side" aria-label="Điều hướng chính">
+    <aside class="side" aria-label="Menu chính">
       <div class="nav-group">
         <button type="button" class="nav active" data-view="overview" onclick="setView('overview',this)">
-          <span class="ico" aria-hidden="true">⊞</span>
+          <span class="ico nav-dot c-emerald" aria-hidden="true">⊞</span>
           <span class="nav-label">Tổng quan</span>
-          <span class="nav-count warn hidden" id="todoCount" title="Việc cần xử lý">0</span>
+          <span class="nav-count warn hidden" id="todoCount">0</span>
+        </button>
+        <button type="button" class="nav" data-view="orders" onclick="setView('orders',this)">
+          <span class="ico nav-dot c-blue" aria-hidden="true">🧮</span>
+          <span class="nav-label">Note đơn · Tính lãi</span>
+          <span class="nav-count" id="orderCount">0</span>
+        </button>
+        <button type="button" class="nav" data-view="finance" onclick="setView('finance',this)">
+          <span class="ico nav-dot c-amber" aria-hidden="true">📊</span>
+          <span class="nav-label">Thu chi & Báo cáo</span>
+          <span class="nav-count warn hidden" id="debtCount" title="Khoản công nợ cần thu/trả">0</span>
         </button>
         <button type="button" class="nav" data-view="shipments" onclick="setView('shipments',this)">
-          <span class="ico" aria-hidden="true">📦</span>
+          <span class="ico nav-dot c-indigo" aria-hidden="true">📦</span>
           <span class="nav-label">Đơn ký gửi</span>
           <span class="nav-count" id="shipCount">0</span>
         </button>
         <button type="button" class="nav" data-view="purchases" onclick="setView('purchases',this)">
-          <span class="ico" aria-hidden="true">🛍</span>
+          <span class="ico nav-dot c-pink" aria-hidden="true">🛍</span>
           <span class="nav-label">Mua hộ</span>
           <span class="nav-count" id="buyCount">0</span>
         </button>
         <button type="button" class="nav" data-view="customers" onclick="setView('customers',this)">
-          <span class="ico" aria-hidden="true">👤</span>
+          <span class="ico nav-dot c-teal" aria-hidden="true">👤</span>
           <span class="nav-label">Khách hàng</span>
           <span class="nav-count" id="custCount">0</span>
         </button>
-        <button type="button" class="nav" data-view="finance" onclick="setView('finance',this)">
-          <span class="ico" aria-hidden="true">₫</span>
-          <span class="nav-label">Thu chi</span>
-          <span class="nav-count" id="financeCount">0</span>
-        </button>
       </div>
 
-      <div class="side-quick">
-        <div class="navtitle">Thao tác nhanh</div>
-        <button type="button" class="quick-btn" onclick="openNew('shipment')">＋ Thêm vận đơn</button>
-        <button type="button" class="quick-btn" onclick="openNew('purchase')">＋ Thêm mua hộ</button>
-        <button type="button" class="quick-btn" onclick="openNew('finance')">＋ Ghi thu / chi</button>
-      </div>
-
-      <div class="side-note">
-        <strong>Lưu cục bộ trên trình duyệt</strong>
-        <span>Dữ liệu lưu tự động trên máy này. Hãy bấm <b>Sao lưu</b> định kỳ để tránh mất dữ liệu.</span>
+      <div class="side-cta">
+        <button type="button" class="btn primary full-btn" onclick="openNew('order')">＋ Tạo Note đơn mới</button>
+        <button type="button" class="btn full-btn" onclick="openNew('finance')">＋ Ghi khoản thu / chi</button>
       </div>
     </aside>
 
@@ -79,32 +80,29 @@
       <section class="heading">
         <div class="heading-text">
           <h1 id="pageTitle">Tổng quan</h1>
-          <p id="pageDesc">Việc cần xử lý, số liệu chính và hoạt động mới nhất.</p>
+          <p id="pageDesc">Theo dõi trực quan lợi nhuận, dòng tiền và việc cần xử lý.</p>
         </div>
-        <div class="actions" id="pageActions">
-          <button id="addBtn" type="button" class="btn primary" onclick="openNew()">＋ Thêm vận đơn</button>
-        </div>
+        <div class="actions" id="pageActions"></div>
       </section>
-
-      <section id="priorityZone" class="priority-zone" aria-label="Việc cần xử lý"></section>
-
-      <section class="metrics" id="metrics" aria-label="Số liệu chính"></section>
 
       <section id="content" class="view-content" aria-live="polite"></section>
     </main>
   </div>
 
-  <div class="overlay" id="modal" onclick="if(event.target===this)closeModal()" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-    <div class="modal">
+  <div class="overlay" id="modal" onmousedown="handleOverlayMouseDown(event)" onclick="handleOverlayClick(event)" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal" id="modalBox">
       <div class="modal-head">
         <div>
           <h2 id="modalTitle">Thêm thông tin</h2>
-          <p id="modalSub">Nhập các trường bắt buộc có dấu (*)</p>
+          <p id="modalSub">Hệ thống tự động tính toán và gắn ngày giờ cập nhật.</p>
         </div>
-        <button type="button" class="xbtn" onclick="closeModal()" aria-label="Đóng biểu mẫu">×</button>
+        <button type="button" class="xbtn" onclick="requestCloseModal()" aria-label="Đóng biểu mẫu">×</button>
       </div>
-      <form id="recordForm" onsubmit="saveRecord(event)">
+      <form id="recordForm" novalidate onsubmit="saveRecord(event)" oninput="markFormDirty()">
+        <div id="formError" class="form-error hidden" role="alert"></div>
         <div class="form" id="formFields"></div>
+        <div id="calcPreviewZone"></div>
+        <div id="recordHistoryZone" class="record-history-zone hidden"></div>
         <div class="modal-footer">
           <div class="danger-zone hidden" id="deleteZone">
             <button type="button" class="btn small danger-outline" id="deletePromptBtn" onclick="askDeleteModal()">Xóa mục này</button>
@@ -115,14 +113,15 @@
             </div>
           </div>
           <div class="modal-actions">
-            <button type="button" class="btn" onclick="closeModal()">Hủy</button>
-            <button class="btn primary" type="submit" id="saveBtn">Lưu thông tin</button>
+            <button type="button" class="btn" onclick="requestCloseModal()">Hủy</button>
+            <button class="btn primary" type="submit" id="saveBtn">✓ Lưu thông tin</button>
           </div>
         </div>
       </form>
     </div>
   </div>
 
+  <datalist id="customerSuggestions"></datalist>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="app.js" defer></script>
 </body>
