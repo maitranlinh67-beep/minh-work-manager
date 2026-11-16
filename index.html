@@ -3,84 +3,143 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#f5f7fa">
-  <title>Minh Work · Quản lý Đơn hàng & Dòng tiền</title>
+  <meta name="theme-color" content="#2f353a">
+  <title>DAIRYCOW LOGISTICS · Hệ thống Quản lý Vận hành WMS & OMS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&subset=vietnamese,latin&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
-<body>
+<body class="theme-coreui">
+  <!-- TOPBAR GỌN GÀNG, CÂN ĐỐI 1 HÀNG DUY NHẤT -->
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="brand" onclick="setView('overview', document.querySelector('[data-view=overview]'))" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setView('overview', document.querySelector('[data-view=overview]'));}" role="button" tabindex="0" aria-label="Về trang tổng quan">
-        <div class="brandmark">M</div>
-        <div class="brandname">
-          <span>Minh Work</span>
-          <small id="today">Quản lý đơn & dòng tiền</small>
+      <div class="topbar-left">
+        <div class="brand" onclick="setView('overview', document.querySelector('[data-view=overview]'))" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setView('overview', document.querySelector('[data-view=overview]'));}" role="button" tabindex="0" aria-label="Về trang tổng quan DairyCow Logistics">
+          <div class="brandmark" aria-hidden="true">🐄</div>
+          <div class="brandname">
+            <span>DAIRYCOW</span>
+            <small id="today">LOGISTICS · WMS & OMS</small>
+          </div>
         </div>
+
+        <button type="button" class="sidebar-toggle" onclick="toggleSidebar()" title="Thu gọn / Mở rộng menu bên trái" aria-label="Thu gọn hoặc mở rộng menu">
+          ☰
+        </button>
+
+        <nav class="topnav-links" aria-label="Điều hướng nhanh">
+          <button type="button" class="topnav-link" data-topnav="overview" onclick="setView('overview', document.querySelector('[data-view=overview]'))">Dashboard</button>
+          <button type="button" class="topnav-link" data-topnav="orders" onclick="setView('orders', document.querySelector('[data-view=orders]'))">Note đơn</button>
+          <button type="button" class="topnav-link" data-topnav="incidentals" onclick="setView('incidentals', document.querySelector('[data-view=incidentals]'))">Chi phí phát sinh</button>
+          <button type="button" class="topnav-link" data-topnav="shipments" onclick="setView('shipments', document.querySelector('[data-view=shipments]'))">Đơn ký gửi</button>
+        </nav>
       </div>
+
       <div class="topright">
-        <span class="save-status" id="saveStatus" title="Dữ liệu tự động lưu trên trình duyệt này">✓ Đã lưu tự động</span>
-        <div class="data-tools">
-          <button type="button" class="btn subtle small" onclick="openHistoryTab()" title="Xem lịch sử mọi lần chỉnh sửa">
-            🕒 Lịch sử
-          </button>
-          <button type="button" class="btn subtle small" onclick="document.getElementById('importFile').click()" title="Khôi phục dữ liệu từ tệp JSON">
-            ↑ Khôi phục
-          </button>
-          <button type="button" class="btn subtle small" onclick="exportData()" title="Tải tệp sao lưu JSON về máy">
-            ↓ Sao lưu
-          </button>
-          <input id="importFile" class="hidden" type="file" accept="application/json" onchange="importData(event)">
+        <span class="save-status" id="saveStatus" title="Dữ liệu tự động lưu an toàn trên trình duyệt này">✓ Đã lưu tự động</span>
+
+        <button type="button" class="notif-btn" onclick="setView('overview', document.querySelector('[data-view=overview]'))" title="Việc cần xử lý & Công nợ mở">
+          🔔
+          <span class="notif-badge" id="topTodoBadge">0</span>
+        </button>
+
+        <button type="button" class="top-ctrl-btn" onclick="toggleSidebarTheme()" id="themeToggleBtn" title="Đổi màu thanh Menu trái (CoreUI Dark / Creative Tim Purple)">
+          🎨 Đổi tone
+        </button>
+
+        <div class="role-switcher" title="Chuyển nhanh phân quyền người dùng">
+          <span class="role-avatar" id="roleAvatar">AD</span>
+          <select id="roleSelect" class="role-select" aria-label="Chọn quyền người dùng" onchange="switchUserRole(this.value)">
+            <option value="admin">👑 Admin</option>
+            <option value="warehouse">📦 Kho WMS</option>
+            <option value="sales">💼 Sale OMS</option>
+          </select>
         </div>
       </div>
     </div>
   </header>
 
-  <div class="shell">
+  <div class="shell" id="appShell">
+    <!-- SIDEBAR TRÁI CHUẨN ADMIN DASHBOARD -->
     <aside class="side" aria-label="Menu chính">
+      <div class="side-section-title">BẢNG ĐIỀU KHIỂN</div>
       <div class="nav-group">
         <button type="button" class="nav active" data-view="overview" onclick="setView('overview',this)">
-          <span class="ico nav-dot c-emerald" aria-hidden="true">⊞</span>
-          <span class="nav-label">Tổng quan</span>
+          <span class="ico nav-dot c-emerald" aria-hidden="true">⏱</span>
+          <span class="nav-label">Dashboard Tổng quan</span>
           <span class="nav-count warn hidden" id="todoCount">0</span>
         </button>
+      </div>
+
+      <div class="side-section-title">VẬN HÀNH LOGISTICS (WMS / OMS)</div>
+      <div class="nav-group">
         <button type="button" class="nav" data-view="orders" onclick="setView('orders',this)">
           <span class="ico nav-dot c-blue" aria-hidden="true">🧮</span>
           <span class="nav-label">Note đơn · Tính lãi</span>
           <span class="nav-count" id="orderCount">0</span>
         </button>
-        <button type="button" class="nav" data-view="finance" onclick="setView('finance',this)">
-          <span class="ico nav-dot c-amber" aria-hidden="true">📊</span>
-          <span class="nav-label">Thu chi & Báo cáo</span>
-          <span class="nav-count warn hidden" id="debtCount" title="Khoản công nợ cần thu/trả">0</span>
+        <button type="button" class="nav" data-view="incidentals" onclick="setView('incidentals',this)">
+          <span class="ico nav-dot c-amber" aria-hidden="true">🪵</span>
+          <span class="nav-label">Chi phí phát sinh</span>
+          <span class="nav-count" id="incCount">0</span>
         </button>
         <button type="button" class="nav" data-view="shipments" onclick="setView('shipments',this)">
           <span class="ico nav-dot c-indigo" aria-hidden="true">📦</span>
-          <span class="nav-label">Đơn ký gửi</span>
+          <span class="nav-label">Đơn ký gửi kho</span>
           <span class="nav-count" id="shipCount">0</span>
         </button>
         <button type="button" class="nav" data-view="purchases" onclick="setView('purchases',this)">
           <span class="ico nav-dot c-pink" aria-hidden="true">🛍</span>
-          <span class="nav-label">Mua hộ</span>
+          <span class="nav-label">Yêu cầu mua hộ</span>
           <span class="nav-count" id="buyCount">0</span>
+        </button>
+      </div>
+
+      <div class="side-section-title">TÀI CHÍNH & KHÁCH HÀNG</div>
+      <div class="nav-group">
+        <button type="button" class="nav" data-view="finance" id="navFinanceBtn" onclick="setView('finance',this)">
+          <span class="ico nav-dot c-amber" aria-hidden="true">📊</span>
+          <span class="nav-label">Thu chi & Báo cáo</span>
+          <span class="nav-count warn hidden" id="debtCount" title="Khoản công nợ cần thu/trả">0</span>
         </button>
         <button type="button" class="nav" data-view="customers" onclick="setView('customers',this)">
           <span class="ico nav-dot c-teal" aria-hidden="true">👤</span>
-          <span class="nav-label">Khách hàng</span>
+          <span class="nav-label">Danh bạ khách hàng</span>
           <span class="nav-count" id="custCount">0</span>
         </button>
       </div>
 
       <div class="side-cta">
         <button type="button" class="btn primary full-btn" onclick="openNew('order')">＋ Tạo Note đơn mới</button>
-        <button type="button" class="btn full-btn" onclick="openNew('finance')">＋ Ghi khoản thu / chi</button>
+        <button type="button" class="btn side-secondary-btn full-btn" onclick="setView('incidentals', document.querySelector('[data-view=incidentals]'))">🪵 Chi phí phát sinh & Đóng gói</button>
+        <button type="button" class="btn side-secondary-btn full-btn" id="sideFinanceBtn" onclick="openNew('finance')">＋ Ghi khoản thu / chi</button>
       </div>
     </aside>
 
+    <!-- KHU VỰC NỘI DUNG CHÍNH -->
     <main class="main-stage">
+      <!-- BREADCRUMB BAR CHUẨN COREUI - CÁC NÚT CÔNG CỤ CÂN ĐỐI BÊN PHẢI -->
+      <div class="breadcrumb-bar">
+        <div class="breadcrumb-path">
+          <span>Home</span>
+          <span class="bc-sep">/</span>
+          <span class="bc-role" id="breadcrumbRole">Admin</span>
+          <span class="bc-sep">/</span>
+          <strong id="breadcrumbCurrent">Dashboard</strong>
+        </div>
+        <div class="breadcrumb-tools">
+          <button type="button" class="bc-tool-btn" onclick="openRoleModal()" title="Thiết lập phân quyền người dùng">🛡 Phân quyền (<span id="activeRoleNavLabel">Admin</span>)</button>
+          <button type="button" class="bc-tool-btn" onclick="openHistoryTab()" title="Xem lịch sử mọi lần chỉnh sửa">🕒 Lịch sử</button>
+          <button type="button" class="bc-tool-btn" onclick="document.getElementById('importFile').click()" title="Khôi phục dữ liệu từ tệp JSON">↑ Khôi phục</button>
+          <button type="button" class="bc-tool-btn primary-chip" onclick="exportData()" title="Tải tệp sao lưu JSON về máy">↓ Sao lưu</button>
+          <input id="importFile" class="hidden" type="file" accept="application/json" onchange="importData(event)">
+        </div>
+      </div>
+
       <section class="heading">
         <div class="heading-text">
           <h1 id="pageTitle">Tổng quan</h1>
-          <p id="pageDesc">Theo dõi trực quan lợi nhuận, dòng tiền và việc cần xử lý.</p>
+          <p id="pageDesc">Theo dõi trực quan lợi nhuận, dòng tiền, dịch vụ đóng gói và việc cần xử lý.</p>
         </div>
         <div class="actions" id="pageActions"></div>
       </section>
@@ -89,6 +148,7 @@
     </main>
   </div>
 
+  <!-- MODAL BIỂU MẪU CHÍNH -->
   <div class="overlay" id="modal" onmousedown="handleOverlayMouseDown(event)" onclick="handleOverlayClick(event)" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal" id="modalBox">
       <div class="modal-head">

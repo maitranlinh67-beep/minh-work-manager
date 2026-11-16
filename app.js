@@ -1,7 +1,17 @@
 const KEY = 'minh-work-manager-v1-data';
+const ROLE_KEY = 'dairycow-active-role';
+const THEME_KEY = 'dairycow-sidebar-theme';
 
 const lineTypes = ['Xách tay', 'Thanh toán hộ', 'Ký gửi kho', 'Mua hộ trọn gói', 'Khác'];
 const goodsTypes = ['Thức ăn khô', 'Gia dụng', 'Mỹ phẩm', 'Quần áo', 'Giày dép', 'Đồ cơ khí', 'Điện tử / Phụ kiện', 'Khác'];
+const packagingTypes = [
+  'Tiêu chuẩn (Miễn phí)',
+  'Đóng hộp gỗ',
+  'Đóng hộp carton',
+  'Chống sốc'
+];
+const packUnits = ['Cái', 'Cuộn', 'Mét', 'Lần sử dụng', 'Thùng'];
+const extraShipStatuses = ['Chưa thu', 'Đã thu', 'Thu một phần'];
 const orderStages = [
   'Mới tạo / Chờ xử lý',
   'Chờ khách thanh toán',
@@ -34,6 +44,14 @@ const buyStages = [
 let db = loadDB();
 let view = 'overview';
 let financeTab = 'cashflow'; // 'cashflow' | 'debts' | 'report' | 'history'
+let incTab = 'extraship'; // 'extraship' | 'wood' | 'carton' | 'shock'
+let incPeriodMode = 'all'; // 'day' | 'week' | 'month' | 'custom' | 'all'
+let incDate = dateKey();
+let incWeekDate = dateKey();
+let incMonth = dateKey().slice(0, 7);
+let incFromDate = dateKey().slice(0, 8) + '01';
+let incToDate = dateKey();
+let draftOrderPackItems = [];
 let query = '';
 let todoFilter = 'all';
 let periodMode = 'month'; // 'day' | 'month' | 'year' | 'all'
@@ -44,6 +62,8 @@ let toastTimer = null;
 let formDirty = false;
 let overlayMouseDownTarget = null;
 let showCnyBox = false;
+let showPackBox = false;
+let currentUserRole = localStorage.getItem(ROLE_KEY) || 'admin';
 window.statusFilter = '';
 
 function pad2(n) {
@@ -64,6 +84,75 @@ function nowStamp(withSeconds = false) {
 
 function makeId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+}
+
+function samplePackagingCatalog() {
+  return [
+    {
+      id: 'pk_wood_1',
+      category: 'wood',
+      name: 'Hộp gỗ',
+      spec: 'Đóng kiện gỗ bảo vệ hàng dễ vỡ',
+      unit: 'Cái',
+      bulkCost: 0,
+      usesPerBulk: 1,
+      costPrice: 50000,
+      sellPrice: 70000,
+      qty: 0,
+      date: dateKey(),
+      note: 'Mẫu đóng hộp gỗ tiêu chuẩn',
+      updatedAt: nowStamp(),
+      history: []
+    },
+    {
+      id: 'pk_carton_1',
+      category: 'carton',
+      name: 'Carton size M',
+      spec: 'Thùng carton 5 lớp cứng cáp',
+      unit: 'Thùng',
+      bulkCost: 0,
+      usesPerBulk: 1,
+      costPrice: 7000,
+      sellPrice: 12000,
+      qty: 0,
+      date: dateKey(),
+      note: 'Mẫu thùng carton size M',
+      updatedAt: nowStamp(),
+      history: []
+    },
+    {
+      id: 'pk_shock_1',
+      category: 'shock',
+      name: 'Chống sốc (Tính theo lần)',
+      spec: 'Cuộn 105.000đ / 20 lần sử dụng',
+      unit: 'Lần sử dụng',
+      bulkCost: 105000,
+      usesPerBulk: 20,
+      costPrice: 5250,
+      sellPrice: 10000,
+      qty: 0,
+      date: dateKey(),
+      note: '1 cuộn 105.000đ dùng 20 lần => Giá vốn 5.250đ/lần',
+      updatedAt: nowStamp(),
+      history: []
+    },
+    {
+      id: 'pk_shock_2',
+      category: 'shock',
+      name: 'Chống sốc tiêu chuẩn',
+      spec: 'Quấn màng xốp hơi bảo vệ',
+      unit: 'Lần sử dụng',
+      bulkCost: 0,
+      usesPerBulk: 1,
+      costPrice: 5000,
+      sellPrice: 10000,
+      qty: 0,
+      date: dateKey(),
+      note: 'Mẫu chống sốc cơ bản',
+      updatedAt: nowStamp(),
+      history: []
+    }
+  ];
 }
 
 function sampleOrderNotes() {
@@ -137,13 +226,15 @@ function loadDB() {
         shipments: Array.isArray(d.shipments) ? d.shipments : [],
         purchases: Array.isArray(d.purchases) ? d.purchases : [],
         transactions: Array.isArray(d.transactions) ? d.transactions : [],
+        extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
+        packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
         logs: Array.isArray(d.logs) ? d.logs : []
       };
     }
     const old = localStorage.getItem('linh-logistics-orders-v1');
     if (old) {
       const arr = JSON.parse(old);
-      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], logs: [] };
+      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], extraShipments: [], packagingCatalog: samplePackagingCatalog(), logs: [] };
     }
   } catch (err) {
     console.error('Lỗi đọc dữ liệu localStorage:', err);
@@ -163,6 +254,8 @@ function loadDB() {
       { id: 't1', type: 'Thu', amount: 1200000, category: 'Phí dịch vụ', party: 'Minh Anh', related: 'DR0001 · Áo khoác', method: 'Chuyển khoản', date: '2026-11-05', note: '', updatedAt: '18:00 - 05/11/2026', history: [] },
       { id: 't2', type: 'Chi', amount: 700000, category: 'Cước vận chuyển', party: 'Nhà vận chuyển', related: 'DR0001 · Áo khoác', method: 'Tiền mặt', date: '2026-11-05', note: '', updatedAt: '18:05 - 05/11/2026', history: [] }
     ],
+    extraShipments: [],
+    packagingCatalog: samplePackagingCatalog(),
     logs: [
       { id: 'l1', time: nowStamp(true), action: 'Khởi động', target: 'Hệ thống', detail: 'Sẵn sàng lưu trữ và tính toán tự động' }
     ]
@@ -198,6 +291,20 @@ function persist() {
 if (!localStorage.getItem(KEY)) {
   try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {}
 }
+
+// Sửa 1 lần: mục mẫu đóng gói là bảng giá, không được tính vào doanh thu thật
+(function fixSeedPackagingQty() {
+  try {
+    if (localStorage.getItem('dairycow-seedfix-v1')) return;
+    const seedIds = ['pk_wood_1', 'pk_carton_1', 'pk_shock_1', 'pk_shock_2'];
+    (db.packagingCatalog || []).forEach(x => {
+      if (seedIds.includes(x.id) && (!x.history || !x.history.length)) x.qty = 0;
+    });
+    localStorage.setItem('dairycow-seedfix-v1', '1');
+    persist();
+  } catch {}
+})();
+
 
 function addAuditLog(action, target, detail) {
   if (!Array.isArray(db.logs)) db.logs = [];
@@ -317,9 +424,9 @@ function linePill(lineType) {
 }
 
 function statusClass(s) {
-  if (['Đã về kho Việt Nam', 'Đã về kho VN', 'Đã giao khách', 'Hoàn tất / Đã tất toán', 'Đặt hàng thành công', 'Đã thanh toán', 'Đã thanh toán hộ'].includes(s)) return 's-green';
-  if (['Mới tạo / Chờ xử lý', 'Chờ khách thanh toán', 'Chờ người bán gửi', 'Chờ xác nhận', 'Chờ báo giá', 'Chờ thanh toán'].includes(s)) return 's-amber';
-  if (s === 'Đã hủy') return 's-red';
+  if (['Đã về kho Việt Nam', 'Đã về kho VN', 'Đã giao khách', 'Hoàn tất / Đã tất toán', 'Đặt hàng thành công', 'Đã thanh toán', 'Đã thanh toán hộ', 'Đã thu'].includes(s)) return 's-green';
+  if (['Mới tạo / Chờ xử lý', 'Chờ khách thanh toán', 'Chờ người bán gửi', 'Chờ xác nhận', 'Chờ báo giá', 'Chờ thanh toán', 'Thu một phần'].includes(s)) return 's-amber';
+  if (s === 'Đã hủy' || s === 'Chưa thu') return 's-red';
   return 's-blue';
 }
 
@@ -338,6 +445,12 @@ function calcOrderMetrics(o) {
       shipCost: 0,
       shipCharge: 0,
       shipProfit: 0,
+      packCost: 0,
+      packCharge: 0,
+      packProfit: 0,
+      extraShipTotal: 0,
+      extraShipPaid: 0,
+      extraShipUnpaid: 0,
       serviceFee: 0,
       fxProfit: 0,
       extraCost: 0,
@@ -356,10 +469,34 @@ function calcOrderMetrics(o) {
   const rateSell = parseNum(o.rateSell);
   const shipCost = Math.round(parseNum(o.shipCost));
   const shipCharge = Math.round(parseNum(o.shipCharge));
+
+  // Tính chi phí & doanh thu đóng gói từ danh sách vật tư gắn vào đơn (giữ nguyên giá tại thời điểm phát sinh)
+  const items = Array.isArray(o.packagingItems) ? o.packagingItems : [];
+  const packCost = items.length > 0
+    ? items.reduce((sum, it) => sum + Math.round(parseNum(it.costPrice) * parseNum(it.qty)), 0)
+    : Math.round(parseNum(o.packCost));
+  const packCharge = items.length > 0
+    ? items.reduce((sum, it) => sum + Math.round(parseNum(it.sellPrice) * parseNum(it.qty)), 0)
+    : Math.round(parseNum(o.packCharge));
+
+  // Cước ship phát sinh liên kết với đơn hàng này (cộng vào tiền khách cần thanh toán, không tính là lợi nhuận mặc định)
+  const linkedExtraShips = (db?.extraShipments || []).filter(x =>
+    (o.id && x.orderId && x.orderId === o.id) ||
+    (o.code && x.orderCode && String(x.orderCode).trim().toLowerCase() === String(o.code).trim().toLowerCase())
+  );
+  const extraShipTotal = linkedExtraShips.reduce((sum, x) => sum + Math.round(parseNum(x.amount)), 0);
+  const extraShipPaid = linkedExtraShips.reduce((sum, x) => {
+    const amt = Math.round(parseNum(x.amount));
+    if (x.status === 'Đã thu') return sum + amt;
+    if (x.status === 'Thu một phần') return sum + Math.min(amt, Math.max(0, Math.round(parseNum(x.paidAmount))));
+    return sum;
+  }, 0);
+  const extraShipUnpaid = Math.max(0, extraShipTotal - extraShipPaid);
+
   const pct = parseNum(o.serviceFeePct);
   const feeManual = Math.round(parseNum(o.serviceFeeManual));
   const extraCost = Math.round(parseNum(o.extraCost));
-  const includeGoods = Boolean(o.includeGoodsInFlow);
+  const includeGoods = o.includeGoodsInFlow !== undefined ? Boolean(o.includeGoodsInFlow) : ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(o.lineType);
 
   const finalGoodsVnd = (cny > 0 && rateSell > 0) ? Math.round(cny * rateSell) : Math.round(vndInput);
   const baseGoodsCostVnd = (cny > 0 && rateSell > 0)
@@ -369,24 +506,27 @@ function calcOrderMetrics(o) {
   // 1. Lãi phí vận chuyển = Cước thu khách - Cước gốc trả kho
   const shipProfit = shipCharge - shipCost;
 
+  // 1b. Lãi dịch vụ đóng gói = Doanh thu đóng gói - Giá vốn vật tư đóng gói
+  const packProfit = packCharge - packCost;
+
   // 2. Phí dịch vụ = Giá cuối sản phẩm × (% : 100), cước vận chuyển tính riêng
   const serviceFee = pct > 0 ? Math.round(finalGoodsVnd * (pct / 100)) : feeManual;
 
-  // 3. Lãi tệ = Số tệ × (Tỷ giá tệ bán - Tỷ giá tệ thu/gốc) (chỉ phát sinh khi có thu & trả hộ tiền hàng bằng tệ)
+  // 3. Lãi tệ = Số tệ × (Tỷ giá tệ bán - Tỷ giá tệ thu/gốc)
   const fxProfit = (includeGoods && cny > 0 && rateBuy > 0 && rateSell > 0) ? Math.round(cny * (rateSell - rateBuy)) : 0;
 
-  // 4. Tổng phải thu từ khách & Tổng tiền phải chuyển ra
-  const totalCollectCustomer = (includeGoods ? finalGoodsVnd : 0) + shipCharge + serviceFee;
-  const totalPayout = (includeGoods ? baseGoodsCostVnd : 0) + shipCost + extraCost;
+  // 4. Tổng phải thu từ khách (bao gồm phí dịch vụ, đóng gói và cước ship phát sinh liên kết)
+  const totalCollectCustomer = (includeGoods ? finalGoodsVnd : 0) + serviceFee + packCharge + extraShipTotal;
+  const totalPayout = (includeGoods ? baseGoodsCostVnd : 0) + shipCost + packCost + extraCost;
 
-  // 5. Lợi nhuận thực tế của đơn
-  const netProfit = shipProfit + serviceFee + fxProfit - extraCost;
+  // 5. Lợi nhuận thực tế của đơn (Cước ship phát sinh là khoản khách trả, không tính vào lợi nhuận mặc định)
+  const netProfit = shipProfit + serviceFee + fxProfit + packProfit - extraCost;
 
-  // 6. Công nợ khách hàng & Công nợ kho / đối tác
-  const customerPaid = Math.round(parseNum(o.customerPaid));
+  // 6. Công nợ khách hàng & Công nợ cước kho (Giữ nguyên Đã trả cước kho)
+  const customerPaid = Math.round(parseNum(o.customerPaid)) + extraShipPaid;
   const customerDebt = Math.max(0, totalCollectCustomer - customerPaid);
   const warehouseDebt = o.warehousePaid ? 0 : shipCost;
-  const partnerDebt = (includeGoods && !o.partnerPaid) ? baseGoodsCostVnd : 0;
+  const partnerDebt = 0;
 
   return {
     finalGoodsVnd,
@@ -394,6 +534,12 @@ function calcOrderMetrics(o) {
     shipCost,
     shipCharge,
     shipProfit,
+    packCost,
+    packCharge,
+    packProfit,
+    extraShipTotal,
+    extraShipPaid,
+    extraShipUnpaid,
     serviceFee,
     fxProfit,
     extraCost,
@@ -439,6 +585,9 @@ function calcPeriodFinancials(prefix = '') {
   let shipCostTotal = 0;
   let shipChargeTotal = 0;
   let shipProfitTotal = 0;
+  let packCostTotal = 0;
+  let packChargeTotal = 0;
+  let packProfitTotal = 0;
   let orderServiceFeeTotal = 0;
   let fxProfitTotal = 0;
   let orderExtraCostTotal = 0;
@@ -448,19 +597,32 @@ function calcPeriodFinancials(prefix = '') {
     orderBilledCustomer += m.totalCollectCustomer;
     orderCollectedCustomer += m.customerPaid;
     orderCommittedOut += m.totalPayout;
-    orderActualOut += ((o.includeGoodsInFlow && o.partnerPaid) ? m.baseGoodsCostVnd : 0) + (o.warehousePaid ? m.shipCost : 0) + m.extraCost;
+    orderActualOut += ((o.includeGoodsInFlow && o.partnerPaid) ? m.baseGoodsCostVnd : 0) + (o.warehousePaid ? m.shipCost : 0) + m.packCost + m.extraCost;
     shipCostTotal += m.shipCost;
     shipChargeTotal += m.shipCharge;
     shipProfitTotal += m.shipProfit;
+    packCostTotal += m.packCost;
+    packChargeTotal += m.packCharge;
+    packProfitTotal += m.packProfit;
     orderServiceFeeTotal += m.serviceFee;
     fxProfitTotal += m.fxProfit;
     orderExtraCostTotal += m.extraCost;
   });
 
+  (db.packagingCatalog || []).filter(item => matchDate(item.date)).forEach(item => {
+    const q = Math.max(0, parseNum(item.qty));
+    const c = Math.round(parseNum(item.costPrice) * q);
+    const r = Math.round(parseNum(item.sellPrice) * q);
+    packCostTotal += c;
+    packChargeTotal += r;
+    packProfitTotal += (r - c);
+  });
+
   const txIn = txs.filter(x => x.type === 'Thu').reduce((a, x) => a + parseNum(x.amount), 0);
   const txOut = txs.filter(x => x.type === 'Chi').reduce((a, x) => a + parseNum(x.amount), 0);
   const txServiceIn = txs.filter(x => x.type === 'Thu' && ['Phí dịch vụ', 'Phí mua hộ'].includes(x.category)).reduce((a, x) => a + parseNum(x.amount), 0);
-  const txOtherIn = txs.filter(x => x.type === 'Thu' && !['Phí dịch vụ', 'Phí mua hộ'].includes(x.category)).reduce((a, x) => a + parseNum(x.amount), 0);
+  const txPackIn = txs.filter(x => x.type === 'Thu' && x.category === 'Đóng gói').reduce((a, x) => a + parseNum(x.amount), 0);
+  const txOtherIn = txs.filter(x => x.type === 'Thu' && !['Phí dịch vụ', 'Phí mua hộ', 'Đóng gói'].includes(x.category)).reduce((a, x) => a + parseNum(x.amount), 0);
 
   let allCustomerDebt = 0;
   let allWarehouseUnpaid = 0;
@@ -476,8 +638,9 @@ function calcPeriodFinancials(prefix = '') {
   const totalBilledCustomer = orderBilledCustomer + txIn;
   const totalTransferredOut = orderActualOut + txOut;
   const totalServiceRevenue = orderServiceFeeTotal + txServiceIn;
+  const totalPackProfit = packProfitTotal + txPackIn;
   const totalIncidentalExpense = orderExtraCostTotal + txOut;
-  const netProfit = shipProfitTotal + totalServiceRevenue + fxProfitTotal + txOtherIn - totalIncidentalExpense;
+  const netProfit = shipProfitTotal + totalServiceRevenue + fxProfitTotal + totalPackProfit + txOtherIn - totalIncidentalExpense;
 
   return {
     orderCount: orders.length,
@@ -492,6 +655,9 @@ function calcPeriodFinancials(prefix = '') {
     shipCostTotal,
     shipChargeTotal,
     shipProfitTotal,
+    packCostTotal,
+    packChargeTotal,
+    packProfitTotal: totalPackProfit,
     totalServiceRevenue,
     fxProfitTotal,
     txOtherIn,
@@ -501,13 +667,315 @@ function calcPeriodFinancials(prefix = '') {
 }
 
 // ============================================================================
-// BIỂU ĐỒ MÀU SẮC TRỰC QUAN (PURE SVG & CSS - KHÔNG CẦN THƯ VIỆN NGOÀI)
+// BIỂU ĐỒ MÀU SẮC TRỰC QUAN (COREUI & CREATIVE TIM DASHBOARD WIDGETS)
 // ============================================================================
+function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingCount) {
+  const hideProfit = currentUserRole === 'warehouse';
+  const packCount = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && (parseNum(o.packCharge) > 0 || (o.packagingType && o.packagingType !== 'Tiêu chuẩn (Miễn phí)'))).length;
+
+  return `<div class="coreui-kpi-grid">
+    <div class="coreui-widget w-blue" onclick="${hideProfit ? "setView('orders',document.querySelector('[data-view=orders]'))" : "openFinanceSubtab('report')"}">
+      <div class="widget-top">
+        <div>
+          <div class="widget-val">${hideProfit ? `${(db.orderNotes || []).length} Note đơn` : `${chartStats.netProfit >= 0 ? '+' : ''}${money(chartStats.netProfit)} ₫`}</div>
+          <div class="widget-label">${hideProfit ? 'Tổng đơn vận hành' : `Lợi nhuận thực tế (${esc(chartPeriodLabel)})`}</div>
+          <div class="widget-sub">${hideProfit ? `Đóng gói kỹ: ${packCount} đơn` : `Cước +${shortMoney(chartStats.shipProfitTotal)} · DV +${shortMoney(chartStats.totalServiceRevenue)} · ĐG +${shortMoney(chartStats.packProfitTotal || 0)}`}</div>
+        </div>
+        <span class="widget-gear" aria-hidden="true">⚙ ▾</span>
+      </div>
+      <svg class="widget-spark" viewBox="0 0 240 56" preserveAspectRatio="none" aria-hidden="true">
+        <polyline fill="none" stroke="rgba(255,255,255,0.65)" stroke-width="2" points="14,42 52,22 90,34 128,14 166,24 204,12 228,36"/>
+        <circle cx="14" cy="42" r="3.5" fill="#20a8d8" stroke="#fff" stroke-width="2"/>
+        <circle cx="52" cy="22" r="3.5" fill="#20a8d8" stroke="#fff" stroke-width="2"/>
+        <circle cx="90" cy="34" r="3.5" fill="#20a8d8" stroke="#fff" stroke-width="2"/>
+        <circle cx="128" cy="14" r="3.5" fill="#20a8d8" stroke="#fff" stroke-width="2"/>
+        <circle cx="166" cy="24" r="3.5" fill="#20a8d8" stroke="#fff" stroke-width="2"/>
+        <circle cx="204" cy="12" r="3.5" fill="#20a8d8" stroke="#fff" stroke-width="2"/>
+        <circle cx="228" cy="36" r="3.5" fill="#20a8d8" stroke="#fff" stroke-width="2"/>
+      </svg>
+    </div>
+
+    <div class="coreui-widget w-cyan" onclick="openFinanceSubtab('cashflow')">
+      <div class="widget-top">
+        <div>
+          <div class="widget-val">${hideProfit ? `${(db.shipments || []).length} Ký gửi` : `${money(chartStats.totalCollectedFromCustomer)} ₫`}</div>
+          <div class="widget-label">${hideProfit ? 'Đơn ký gửi kho TQ - VN' : `Đã thu từ khách (${esc(chartPeriodLabel)})`}</div>
+          <div class="widget-sub">${hideProfit ? 'Bấm để quản lý mã vận đơn' : `Phát sinh phải thu: ${money(chartStats.totalBilledCustomer)} ₫`}</div>
+        </div>
+        <span class="widget-gear" aria-hidden="true">📍</span>
+      </div>
+      <svg class="widget-spark" viewBox="0 0 240 56" preserveAspectRatio="none" aria-hidden="true">
+        <polyline fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="2" points="14,46 54,36 94,26 134,12 174,25 214,34 228,44"/>
+        <circle cx="14" cy="46" r="3.5" fill="#63c2de" stroke="#fff" stroke-width="2"/>
+        <circle cx="54" cy="36" r="3.5" fill="#63c2de" stroke="#fff" stroke-width="2"/>
+        <circle cx="94" cy="26" r="3.5" fill="#63c2de" stroke="#fff" stroke-width="2"/>
+        <circle cx="134" cy="12" r="3.5" fill="#63c2de" stroke="#fff" stroke-width="2"/>
+        <circle cx="174" cy="25" r="3.5" fill="#63c2de" stroke="#fff" stroke-width="2"/>
+        <circle cx="214" cy="34" r="3.5" fill="#63c2de" stroke="#fff" stroke-width="2"/>
+      </svg>
+    </div>
+
+    <div class="coreui-widget w-amber" onclick="openFinanceSubtab('debts')">
+      <div class="widget-top">
+        <div>
+          <div class="widget-val">${money(allStats.allCustomerDebt)} ₫</div>
+          <div class="widget-label">Khách còn nợ chưa thu</div>
+          <div class="widget-sub">${allStats.allWarehouseUnpaid > 0 ? `Cước kho chưa trả: ${money(allStats.allWarehouseUnpaid)} ₫` : '✓ Đã thanh toán hết cước kho'}</div>
+        </div>
+        <span class="widget-gear" aria-hidden="true">⚙ ▾</span>
+      </div>
+      <svg class="widget-spark" viewBox="0 0 240 56" preserveAspectRatio="none" aria-hidden="true">
+        <path d="M0,38 Q45,10 95,22 T185,34 T240,18 L240,56 L0,56 Z" fill="rgba(255,255,255,0.25)"/>
+        <path d="M0,38 Q45,10 95,22 T185,34 T240,18" fill="none" stroke="rgba(255,255,255,0.85)" stroke-width="2"/>
+      </svg>
+    </div>
+
+    <div class="coreui-widget w-red" onclick="setView('shipments',document.querySelector('[data-view=shipments]'))">
+      <div class="widget-top">
+        <div>
+          <div class="widget-val">${allPendingCount} mục · ${(db.shipments || []).length} VĐ</div>
+          <div class="widget-label">Đơn ký gửi & Việc cần xử lý</div>
+          <div class="widget-sub">${(db.orderNotes || []).length} Note đơn · ${packCount} Đóng gói · ${(db.purchases || []).length} Mua hộ</div>
+        </div>
+        <span class="widget-gear" aria-hidden="true">⚙ ▾</span>
+      </div>
+      <svg class="widget-spark" viewBox="0 0 240 56" preserveAspectRatio="none" aria-hidden="true">
+        ${[28, 38, 18, 32, 42, 26, 20, 36, 24, 40, 22, 34, 18, 38, 28, 22].map((h, i) => `<rect x="${10 + i * 14}" y="${56 - h}" width="7" height="${h}" rx="1.5" fill="rgba(255,255,255,0.45)"/>`).join('')}
+      </svg>
+    </div>
+  </div>`;
+}
+
+function renderTrafficChartCard(s, periodLabel) {
+  const bucketMap = new Map();
+  const prefix = getActivePeriodPrefix();
+  const useMonthly = periodMode === 'year';
+
+  const getKey = d => {
+    const raw = d || dateKey();
+    return useMonthly ? raw.slice(0, 7) : raw;
+  };
+  const ensure = k => {
+    if (!bucketMap.has(k)) bucketMap.set(k, { key: k, moneyIn: 0, moneyOut: 0, profit: 0 });
+    return bucketMap.get(k);
+  };
+
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy').forEach(o => {
+    const b = ensure(getKey(o.date));
+    const m = calcOrderMetrics(o);
+    b.moneyIn += m.customerPaid + m.shipCharge;
+    b.moneyOut += ((o.includeGoodsInFlow && o.partnerPaid) ? m.baseGoodsCostVnd : 0) + (o.warehousePaid ? m.shipCost : 0) + m.packCost + m.extraCost;
+    b.profit += m.netProfit;
+  });
+
+  (db.transactions || []).forEach(x => {
+    const b = ensure(getKey(x.date));
+    const amt = parseNum(x.amount);
+    if (x.type === 'Thu') {
+      b.moneyIn += amt;
+      b.profit += amt;
+    } else {
+      b.moneyOut += amt;
+      b.profit -= amt;
+    }
+  });
+
+  let pts = [...bucketMap.values()].sort((a, b) => a.key.localeCompare(b.key)).slice(-8);
+  if (pts.length < 3) {
+    const base = pts[0] || { key: dateKey(), moneyIn: 1800000, moneyOut: 950000, profit: 650000 };
+    pts = [
+      { key: 'Kỳ 1', moneyIn: Math.round(base.moneyIn * 0.55), moneyOut: Math.round(base.moneyOut * 0.6), profit: Math.round(base.profit * 0.5) },
+      { key: 'Kỳ 2', moneyIn: Math.round(base.moneyIn * 0.85), moneyOut: Math.round(base.moneyOut * 0.7), profit: Math.round(base.profit * 0.8) },
+      { key: 'Kỳ 3', moneyIn: Math.round(base.moneyIn * 0.68), moneyOut: Math.round(base.moneyOut * 0.65), profit: Math.round(base.profit * 0.72) },
+      { key: 'Kỳ 4', moneyIn: Math.round(base.moneyIn * 0.92), moneyOut: Math.round(base.moneyOut * 0.75), profit: Math.round(base.profit * 0.9) },
+      ...pts
+    ];
+  }
+
+  const maxV = Math.max(500000, ...pts.flatMap(p => [p.moneyIn, p.moneyOut, Math.abs(p.profit)]));
+  const W = 760;
+  const H = 195;
+  const padL = 48;
+  const padR = 18;
+  const padT = 14;
+  const padB = 26;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  const toX = idx => padL + (pts.length <= 1 ? plotW / 2 : (idx / (pts.length - 1)) * plotW);
+  const toY = val => padT + plotH - Math.min(1, Math.max(0, val / maxV)) * plotH;
+
+  const smoothPath = arr => {
+    if (!arr.length) return '';
+    if (arr.length === 1) return `M ${arr[0].x} ${arr[0].y}`;
+    let d = `M ${arr[0].x.toFixed(1)} ${arr[0].y.toFixed(1)}`;
+    for (let i = 0; i < arr.length - 1; i++) {
+      const p0 = arr[i];
+      const p1 = arr[i + 1];
+      const cx = ((p0.x + p1.x) / 2).toFixed(1);
+      d += ` C ${cx} ${p0.y.toFixed(1)}, ${cx} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
+    }
+    return d;
+  };
+
+  const inCoords = pts.map((p, i) => ({ x: toX(i), y: toY(p.moneyIn), lbl: shortDateLabel(p.key), v: p.moneyIn }));
+  const profCoords = pts.map((p, i) => ({ x: toX(i), y: toY(Math.max(0, p.profit)), v: p.profit }));
+  const outCoords = pts.map((p, i) => ({ x: toX(i), y: toY(p.moneyOut), v: p.moneyOut }));
+
+  const inLine = smoothPath(inCoords);
+  const inArea = `${inLine} L ${inCoords[inCoords.length - 1].x.toFixed(1)} ${(padT + plotH).toFixed(1)} L ${inCoords[0].x.toFixed(1)} ${(padT + plotH).toFixed(1)} Z`;
+  const profLine = smoothPath(profCoords);
+  const outLine = smoothPath(outCoords);
+
+  const posSum = Math.max(1, Math.max(0, s.shipProfitTotal) + Math.max(0, s.totalServiceRevenue) + Math.max(0, s.packProfitTotal || 0) + Math.max(0, s.fxProfitTotal));
+  const pctShip = Math.min(100, Math.max(12, Math.round((Math.max(0, s.shipProfitTotal) / posSum) * 100)));
+  const pctFee = Math.min(100, Math.max(12, Math.round((Math.max(0, s.totalServiceRevenue) / posSum) * 100)));
+  const pctPack = Math.min(100, Math.max(10, Math.round((Math.max(0, s.packProfitTotal || 0) / posSum) * 100)));
+  const pctFx = Math.min(100, Math.max(10, Math.round((Math.max(0, s.fxProfitTotal) / posSum) * 100)));
+  const collectRatio = s.totalBilledCustomer > 0 ? Math.min(100, Math.round((s.totalCollectedFromCustomer / s.totalBilledCustomer) * 100)) : 80;
+
+  return `<div class="traffic-card">
+    <div class="traffic-head">
+      <div>
+        <h3 class="traffic-title">Traffic · Lưu lượng Dòng tiền & Lợi nhuận</h3>
+        <div class="traffic-sub">${esc(periodLabel)} · DAIRYCOW LOGISTICS (Xanh lam: Dòng thu · Xanh lá: Lợi nhuận · Đứt nét đỏ: Chi/Chuyển ra)</div>
+      </div>
+      <div class="traffic-controls">
+        <div class="btn-group-seg" role="group" aria-label="Chế độ kỳ báo cáo">
+          <button type="button" class="seg-btn ${periodMode === 'day' ? 'active' : ''}" onclick="periodMode='day';render()">Day</button>
+          <button type="button" class="seg-btn ${periodMode === 'month' ? 'active' : ''}" onclick="periodMode='month';render()">Month</button>
+          <button type="button" class="seg-btn ${periodMode === 'year' ? 'active' : ''}" onclick="periodMode='year';render()">Year</button>
+          <button type="button" class="seg-btn ${periodMode === 'all' ? 'active' : ''}" onclick="periodMode='all';render()">All</button>
+        </div>
+        <button type="button" class="cloud-btn" onclick="exportData()" title="Xuất báo cáo sao lưu JSON">☁ ↓</button>
+      </div>
+    </div>
+
+    <div class="traffic-chart-wrap">
+      <svg viewBox="0 0 ${W} ${H}" class="traffic-svg" aria-label="Biểu đồ lưu lượng dòng tiền và lợi nhuận">
+        ${[0, 0.25, 0.5, 0.75, 1].map(r => {
+          const y = (padT + plotH * (1 - r)).toFixed(1);
+          const vLabel = shortMoney(maxV * r);
+          return `<g>
+            <line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#ebedef" stroke-width="1"/>
+            <text x="${padL - 8}" y="${Number(y) + 4}" text-anchor="end" font-size="10" fill="#73818f">${vLabel}</text>
+          </g>`;
+        }).join('')}
+        <path d="${inArea}" fill="rgba(32, 168, 216, 0.14)"/>
+        <path d="${inLine}" fill="none" stroke="#20a8d8" stroke-width="2.4"/>
+        <path d="${profLine}" fill="none" stroke="#4dbd74" stroke-width="2.4"/>
+        <path d="${outLine}" fill="none" stroke="#f86c6b" stroke-width="1.8" stroke-dasharray="5 4"/>
+        ${inCoords.map((c, idx) => `<g>
+          <circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.2" fill="#fff" stroke="#20a8d8" stroke-width="2">
+            <title>${esc(c.lbl)} · Thu: +${money(c.v)} ₫ · Lãi: +${money(profCoords[idx].v)} ₫</title>
+          </circle>
+          <text x="${c.x.toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#73818f">${esc(c.lbl)}</text>
+        </g>`).join('')}
+      </svg>
+    </div>
+
+    <div class="traffic-footer">
+      <div class="tf-col">
+        <span class="tf-label">Đã thu từ khách</span>
+        <strong class="tf-val">${money(s.totalCollectedFromCustomer)} ₫ (${collectRatio}%)</strong>
+        <div class="tf-bar"><span style="width:${collectRatio}%;background:#4dbd74"></span></div>
+      </div>
+      <div class="tf-col">
+        <span class="tf-label">Lãi cước vận chuyển</span>
+        <strong class="tf-val">+${money(s.shipProfitTotal)} ₫ (${pctShip}%)</strong>
+        <div class="tf-bar"><span style="width:${pctShip}%;background:#63c2de"></span></div>
+      </div>
+      <div class="tf-col">
+        <span class="tf-label">Doanh thu Phí dịch vụ</span>
+        <strong class="tf-val">+${money(s.totalServiceRevenue)} ₫ (${pctFee}%)</strong>
+        <div class="tf-bar"><span style="width:${pctFee}%;background:#f8cb00"></span></div>
+      </div>
+      <div class="tf-col">
+        <span class="tf-label">Lãi Dịch vụ Đóng gói</span>
+        <strong class="tf-val">+${money(s.packProfitTotal || 0)} ₫ (${pctPack}%)</strong>
+        <div class="tf-bar"><span style="width:${pctPack}%;background:#f86c6b"></span></div>
+      </div>
+      <div class="tf-col">
+        <span class="tf-label">Lãi tỷ giá tệ (FX)</span>
+        <strong class="tf-val">+${money(s.fxProfitTotal)} ₫ (${pctFx}%)</strong>
+        <div class="tf-bar"><span style="width:${pctFx}%;background:#20a8d8"></span></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderCoreUiChannelCards() {
+  const orders = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy');
+  const xtOrders = orders.filter(o => o.lineType === 'Xách tay');
+  const xtProfit = xtOrders.reduce((s, o) => s + calcOrderMetrics(o).netProfit, 0);
+
+  const tthOrders = orders.filter(o => o.lineType === 'Thanh toán hộ');
+  const tthProfit = tthOrders.reduce((s, o) => s + calcOrderMetrics(o).netProfit, 0);
+
+  const shipments = db.shipments || [];
+  const activeShip = shipments.filter(s => s.status !== 'Đã giao khách').length;
+
+  const incSum = calcIncidentalsSummary();
+  const packItemsCount = (db.packagingCatalog || []).length;
+  const packProfit = incSum.totalPackProfit;
+
+  return `<div class="channel-grid">
+    <div class="channel-card" onclick="jumpToOrderFilter('__line_Xách tay')">
+      <div class="channel-head ch-navy">
+        <span class="channel-ico">✈️</span>
+        <span class="channel-name">LINE XÁCH TAY</span>
+        <svg class="channel-wave" viewBox="0 0 240 90" preserveAspectRatio="none"><path d="M0,68 Q60,30 120,58 T240,38 L240,90 L0,90 Z" fill="rgba(255,255,255,0.12)"/><path d="M0,68 Q60,30 120,58 T240,38" fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="1.8"/></svg>
+      </div>
+      <div class="channel-foot">
+        <div class="ch-stat"><strong>${xtOrders.length} đơn</strong><span>Số lượng</span></div>
+        <div class="ch-stat"><strong>+${shortMoney(xtProfit)} ₫</strong><span>Lãi ròng</span></div>
+      </div>
+    </div>
+
+    <div class="channel-card" onclick="jumpToOrderFilter('__line_Thanh toán hộ')">
+      <div class="channel-head ch-sky">
+        <span class="channel-ico">💴</span>
+        <span class="channel-name">THANH TOÁN HỘ</span>
+        <svg class="channel-wave" viewBox="0 0 240 90" preserveAspectRatio="none"><path d="M0,62 Q70,78 135,44 T240,28 L240,90 L0,90 Z" fill="rgba(255,255,255,0.14)"/><path d="M0,62 Q70,78 135,44 T240,28" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1.8"/></svg>
+      </div>
+      <div class="channel-foot">
+        <div class="ch-stat"><strong>${tthOrders.length} đơn</strong><span>Số lượng</span></div>
+        <div class="ch-stat"><strong>+${shortMoney(tthProfit)} ₫</strong><span>Lãi ròng</span></div>
+      </div>
+    </div>
+
+    <div class="channel-card" onclick="setView('shipments',document.querySelector('[data-view=shipments]'))">
+      <div class="channel-head ch-steel">
+        <span class="channel-ico">📦</span>
+        <span class="channel-name">ĐƠN KÝ GỬI KHO</span>
+        <svg class="channel-wave" viewBox="0 0 240 90" preserveAspectRatio="none"><path d="M0,45 Q65,24 130,56 T240,52 L240,90 L0,90 Z" fill="rgba(255,255,255,0.12)"/><path d="M0,45 Q65,24 130,56 T240,52" fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="1.8"/></svg>
+      </div>
+      <div class="channel-foot">
+        <div class="ch-stat"><strong>${shipments.length} VĐ</strong><span>Tổng ký gửi</span></div>
+        <div class="ch-stat"><strong>${activeShip} kiện</strong><span>Đang vận hành</span></div>
+      </div>
+    </div>
+
+    <div class="channel-card" onclick="setView('incidentals',document.querySelector('[data-view=incidentals]'))">
+      <div class="channel-head ch-coral">
+        <span class="channel-ico">🪵</span>
+        <span class="channel-name">CHI PHÍ PHÁT SINH & ĐÓNG GÓI</span>
+        <svg class="channel-wave" viewBox="0 0 240 90" preserveAspectRatio="none"><path d="M0,64 Q45,18 110,55 T240,24 L240,90 L0,90 Z" fill="rgba(255,255,255,0.13)"/><path d="M0,64 Q45,18 110,55 T240,24" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1.8"/></svg>
+      </div>
+      <div class="channel-foot">
+        <div class="ch-stat"><strong>${packItemsCount} mục</strong><span>Danh mục ĐG</span></div>
+        <div class="ch-stat"><strong>+${shortMoney(packProfit)} ₫</strong><span>Lãi đóng gói</span></div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderProfitDonutChart(s, periodText) {
   const slices = [
-    { label: 'Lãi phí vận chuyển', val: Math.max(0, s.shipProfitTotal), color: '#2563eb' },
-    { label: 'Doanh thu phí dịch vụ', val: Math.max(0, s.totalServiceRevenue), color: '#10b981' },
-    { label: 'Lãi chênh lệch tỷ giá tệ', val: Math.max(0, s.fxProfitTotal), color: '#f59e0b' }
+    { label: 'Lãi phí vận chuyển', val: Math.max(0, s.shipProfitTotal), color: '#20a8d8' },
+    { label: 'Doanh thu phí dịch vụ', val: Math.max(0, s.totalServiceRevenue), color: '#4dbd74' },
+    { label: 'Lãi dịch vụ đóng gói', val: Math.max(0, s.packProfitTotal || 0), color: '#f86c6b' },
+    { label: 'Lãi chênh lệch tỷ giá tệ', val: Math.max(0, s.fxProfitTotal), color: '#f8cb00' }
   ];
   if ((s.txOtherIn || 0) > 0) {
     slices.push({ label: 'Khoản thu khác', val: Math.max(0, s.txOtherIn), color: '#8b5cf6' });
@@ -528,8 +996,8 @@ function renderProfitDonutChart(s, periodText) {
   return `<div class="chart-panel">
     <div class="chart-panel-head">
       <div>
-        <div class="chart-panel-title">🎨 Cơ cấu nguồn lợi nhuận</div>
-        <div class="chart-panel-sub">${esc(periodText)} · Tỷ trọng từng nguồn sinh lời</div>
+        <div class="chart-panel-title">Cơ cấu nguồn lợi nhuận (Profit Statistics)</div>
+        <div class="chart-panel-sub">${esc(periodText)} · Tỷ trọng từng dịch vụ vận hành & đóng gói</div>
       </div>
       ${s.totalIncidentalExpense > 0 ? `<span class="debt-pill owe" style="margin:0">Chi phát sinh: −${money(s.totalIncidentalExpense)} ₫</span>` : ''}
     </div>
@@ -559,6 +1027,10 @@ function renderProfitDonutChart(s, periodText) {
           </div>`;
         }).join('')}
       </div>
+    </div>
+    <div class="chart-card-foot">
+      <span>🕒 Tự động tổng hợp thời gian thực</span>
+      <span>DAIRYCOW ANALYTICS</span>
     </div>
   </div>`;
 }
@@ -751,13 +1223,21 @@ function openHistoryTab() {
 }
 
 function quickStatus(kind, id, newStatus) {
-  const list = kind === 'order' ? db.orderNotes : kind === 'shipment' ? db.shipments : db.purchases;
-  const item = list.find(x => x.id === id);
+  const list =
+    kind === 'order' ? db.orderNotes :
+    kind === 'shipment' ? db.shipments :
+    kind === 'extraship' ? db.extraShipments :
+    db.purchases;
+  const item = (list || []).find(x => x.id === id);
   if (!item) return;
   const oldStatus = item.status;
   if (oldStatus === newStatus) return;
   const stamp = nowStamp();
   item.status = newStatus;
+  if (kind === 'extraship') {
+    if (newStatus === 'Đã thu') item.paidAmount = Math.round(parseNum(item.amount));
+    if (newStatus === 'Chưa thu') item.paidAmount = 0;
+  }
   item.updatedAt = stamp;
   if (!Array.isArray(item.history)) item.history = [];
   item.history.unshift({
@@ -765,7 +1245,8 @@ function quickStatus(kind, id, newStatus) {
     action: 'Đổi trạng thái',
     detail: `${oldStatus} → ${newStatus}`
   });
-  addAuditLog('Đổi trạng thái', `${kind === 'order' ? 'Note đơn' : kind === 'shipment' ? 'Vận đơn' : 'Mua hộ'} · ${item.customer}`, `${oldStatus} → ${newStatus}`);
+  const kindTitle = kind === 'order' ? 'Note đơn' : kind === 'shipment' ? 'Vận đơn' : kind === 'extraship' ? 'Cước ship phát sinh' : 'Mua hộ';
+  addAuditLog('Đổi trạng thái', `${kindTitle} · ${item.customer || item.orderCode || ''}`, `${oldStatus} → ${newStatus}`);
   persist();
   render();
   toast(`✓ Đã đổi trạng thái: ${newStatus} (${stamp})`);
@@ -779,7 +1260,15 @@ function settleOrderDebt(id, targetType) {
   if (!Array.isArray(o.history)) o.history = [];
 
   if (targetType === 'customer') {
-    o.customerPaid = m.totalCollectCustomer;
+    o.customerPaid = Math.max(0, m.totalCollectCustomer - m.extraShipPaid);
+    // Đồng thời đánh dấu Đã thu cho các khoản cước ship phát sinh liên kết với đơn này
+    (db.extraShipments || []).forEach(x => {
+      if ((o.id && x.orderId === o.id) || (o.code && x.orderCode && String(x.orderCode).trim().toLowerCase() === String(o.code).trim().toLowerCase())) {
+        x.status = 'Đã thu';
+        x.paidAmount = Math.round(parseNum(x.amount));
+        x.updatedAt = stamp;
+      }
+    });
     o.updatedAt = stamp;
     o.history.unshift({ time: nowStamp(true), action: 'Thu đủ tiền khách', detail: `Đã thu đủ ${money(m.totalCollectCustomer)} ₫` });
     addAuditLog('Thu đủ công nợ', `Khách ${o.customer}`, `Thu đủ ${money(m.totalCollectCustomer)} ₫ cho đơn ${o.product || o.goodsType}`);
@@ -790,12 +1279,6 @@ function settleOrderDebt(id, targetType) {
     o.history.unshift({ time: nowStamp(true), action: 'Thanh toán cước kho', detail: `Đã trả kho ${money(m.shipCost)} ₫` });
     addAuditLog('Trả cước kho', `Đơn ${o.customer}`, `Đã thanh toán cước gốc ${money(m.shipCost)} ₫ cho kho`);
     toast(`✓ Đã đánh dấu trả kho ${money(m.shipCost)} ₫`);
-  } else if (targetType === 'partner') {
-    o.partnerPaid = true;
-    o.updatedAt = stamp;
-    o.history.unshift({ time: nowStamp(true), action: 'Chuyển tiền hàng', detail: `Đã chuyển vốn hàng ${money(m.baseGoodsCostVnd)} ₫` });
-    addAuditLog('Chuyển tiền hàng', `Đơn ${o.customer}`, `Đã thanh toán vốn hàng ${money(m.baseGoodsCostVnd)} ₫`);
-    toast(`✓ Đã đánh dấu chuyển tiền hàng ${money(m.baseGoodsCostVnd)} ₫`);
   }
   persist();
   render();
@@ -870,7 +1353,10 @@ function setView(v, el) {
   document.querySelectorAll('.nav').forEach(n => {
     n.classList.toggle('active', n.dataset.view === v);
   });
-  if (el) el.classList.add('active');
+  document.querySelectorAll('.topnav-link').forEach(n => {
+    n.classList.toggle('active', n.dataset.topnav === v);
+  });
+  if (el && el.classList.contains('nav')) el.classList.add('active');
   render();
 }
 
@@ -915,6 +1401,16 @@ function updateTableResults() {
     const data = getOrdersViewData();
     area.innerHTML = data.tableHtml;
     if (countEl) countEl.textContent = `${data.filteredCount} / ${data.totalCount} đơn`;
+  } else if (view === 'incidentals') {
+    if (incTab === 'extraship') {
+      const data = getExtraShipViewData();
+      area.innerHTML = data.tableHtml;
+      if (countEl) countEl.textContent = `${data.filteredCount} / ${data.totalCount} khoản`;
+    } else {
+      const data = getPackagingTabViewData(incTab);
+      area.innerHTML = data.tableHtml;
+      if (countEl) countEl.textContent = `${data.filteredCount} / ${data.totalCount} sản phẩm`;
+    }
   } else if (view === 'shipments') {
     const data = getShipmentsViewData();
     area.innerHTML = data.tableHtml;
@@ -943,7 +1439,7 @@ function getPendingItems() {
     .filter(o => {
       if (o.status === 'Đã hủy') return false;
       const m = calcOrderMetrics(o);
-      const hasDebt = m.customerDebt > 0 || m.warehouseDebt > 0 || m.partnerDebt > 0;
+      const hasDebt = m.customerDebt > 0 || m.warehouseDebt > 0;
       return !['Đã giao khách', 'Hoàn tất / Đã tất toán'].includes(o.status) || hasDebt;
     })
     .map(o => {
@@ -969,6 +1465,89 @@ function getPendingItems() {
 }
 
 // ============================================================================
+// ĐIỀU KHIỂN GIAO DIỆN SIDEBAR, TONE MÀU & PHÂN QUYỀN (DAIRYCOW LOGISTICS)
+// ============================================================================
+function toggleSidebar() {
+  document.getElementById('appShell')?.classList.toggle('sidebar-collapsed');
+}
+
+function toggleSidebarTheme() {
+  const isPurple = document.body.classList.toggle('theme-purple');
+  try {
+    localStorage.setItem(THEME_KEY, isPurple ? 'purple' : 'coreui');
+  } catch {}
+  toast(isPurple ? '🎨 Đã chuyển sang tone Tím (Creative Tim)' : '🎨 Đã chuyển sang tone Đậm (CoreUI Dark)');
+}
+
+function switchUserRole(role) {
+  currentUserRole = ['admin', 'warehouse', 'sales'].includes(role) ? role : 'admin';
+  try {
+    localStorage.setItem(ROLE_KEY, currentUserRole);
+  } catch {}
+  if (currentUserRole === 'warehouse' && view === 'finance') {
+    view = 'shipments';
+  }
+  addAuditLog('Đổi phân quyền', 'Hệ thống', `Chuyển chế độ làm việc sang quyền: ${currentUserRole.toUpperCase()}`);
+  render();
+  const roleNames = {
+    admin: '👑 Admin (Toàn quyền quản trị & lợi nhuận)',
+    warehouse: '📦 Nhân viên Kho & Đóng gói (WMS)',
+    sales: '💼 Nhân viên Sale & CSKH (OMS)'
+  };
+  toast(`Đã chuyển sang chế độ: ${roleNames[currentUserRole]}`);
+}
+
+function openRoleModal() {
+  const form = document.getElementById('recordForm');
+  form.dataset.kind = 'role_info';
+  form.dataset.id = '';
+  formDirty = false;
+  hideFormError();
+  document.getElementById('modalBox')?.classList.remove('wide');
+  document.getElementById('modalTitle').textContent = '🛡 Phân quyền vận hành · DAIRYCOW LOGISTICS';
+  document.getElementById('modalSub').textContent = 'Thiết lập quyền truy cập theo vị trí công việc (Admin, Kho & Đóng gói, Sale/CSKH).';
+  document.getElementById('deleteZone').classList.add('hidden');
+  document.getElementById('recordHistoryZone').classList.add('hidden');
+  document.getElementById('calcPreviewZone').innerHTML = '';
+
+  document.getElementById('formFields').innerHTML = `
+    <div class="full">
+      <div class="form-card" style="grid-template-columns:1fr">
+        <div class="form-card-title"><span>Chọn vai trò đang sử dụng trên thiết bị này</span></div>
+        <div class="todo-row" style="padding:10px 4px">
+          <div>
+            <b>👑 Admin / Chủ hệ thống (Toàn quyền)</b>
+            <div class="subline">Xem toàn bộ lợi nhuận thực tế, lãi đóng gói, lãi tỷ giá tệ, sổ thu chi, công nợ và sao lưu dữ liệu.</div>
+          </div>
+          <button type="button" class="btn small ${currentUserRole === 'admin' ? 'primary' : ''}" onclick="switchUserRole('admin');closeModal()">
+            ${currentUserRole === 'admin' ? '✓ Đang dùng' : 'Chọn quyền này'}
+          </button>
+        </div>
+        <div class="todo-row" style="padding:10px 4px">
+          <div>
+            <b>📦 Nhân viên Kho & Đóng gói (WMS)</b>
+            <div class="subline">Quản lý Đơn ký gửi kho, cập nhật mã vận đơn TQ - VN, chọn quy cách đóng gói (đóng gỗ, bọt khí, thùng carton). Ẩn báo cáo lợi nhuận nhạy cảm.</div>
+          </div>
+          <button type="button" class="btn small ${currentUserRole === 'warehouse' ? 'primary' : ''}" onclick="switchUserRole('warehouse');closeModal()">
+            ${currentUserRole === 'warehouse' ? '✓ Đang dùng' : 'Chọn quyền này'}
+          </button>
+        </div>
+        <div class="todo-row" style="padding:10px 4px">
+          <div>
+            <b>💼 Nhân viên Sale & CSKH (OMS)</b>
+            <div class="subline">Tạo Note đơn, báo giá Yêu cầu mua hộ, chăm sóc Danh bạ khách hàng và theo dõi tiến độ đơn.</div>
+          </div>
+          <button type="button" class="btn small ${currentUserRole === 'sales' ? 'primary' : ''}" onclick="switchUserRole('sales');closeModal()">
+            ${currentUserRole === 'sales' ? '✓ Đang dùng' : 'Chọn quyền này'}
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('modal').classList.add('open');
+}
+
+// ============================================================================
 // RENDER CHÍNH (KHÔNG LẶP THẺ TRÙNG LẶP GIỮA CÁC TRANG)
 // ============================================================================
 function render() {
@@ -980,7 +1559,7 @@ function render() {
   const debtRecordsCount = (db.orderNotes || []).filter(o => {
     if (o.status === 'Đã hủy') return false;
     const m = calcOrderMetrics(o);
-    return m.customerDebt > 0 || m.warehouseDebt > 0 || m.partnerDebt > 0;
+    return m.customerDebt > 0 || m.warehouseDebt > 0;
   }).length;
 
   document.getElementById('orderCount').textContent = (db.orderNotes || []).length;
@@ -988,10 +1567,25 @@ function render() {
   document.getElementById('buyCount').textContent = (db.purchases || []).length;
   document.getElementById('custCount').textContent = customerCount;
 
+  const incCountEl = document.getElementById('incCount');
+  if (incCountEl) {
+    incCountEl.textContent = (db.extraShipments || []).length + (db.packagingCatalog || []).length;
+  }
+
+  document.querySelectorAll('.topnav-link').forEach(n => {
+    n.classList.toggle('active', n.dataset.topnav === view);
+  });
+
   const todoBadge = document.getElementById('todoCount');
   if (todoBadge) {
     todoBadge.textContent = pendingTotal;
     todoBadge.classList.toggle('hidden', pendingTotal === 0);
+  }
+
+  const topTodoBadge = document.getElementById('topTodoBadge');
+  if (topTodoBadge) {
+    topTodoBadge.textContent = pendingTotal;
+    topTodoBadge.classList.toggle('hidden', pendingTotal === 0);
   }
 
   const debtBadge = document.getElementById('debtCount');
@@ -1000,26 +1594,66 @@ function render() {
     debtBadge.classList.toggle('hidden', debtRecordsCount === 0);
   }
 
+  const roleShortMap = { admin: 'Admin', warehouse: 'Kho WMS', sales: 'Sale OMS' };
+  const roleAvatarMap = { admin: 'AD', warehouse: 'WH', sales: 'SL' };
+  const roleSelectEl = document.getElementById('roleSelect');
+  if (roleSelectEl) roleSelectEl.value = currentUserRole;
+  const roleAvatarEl = document.getElementById('roleAvatar');
+  if (roleAvatarEl) roleAvatarEl.textContent = roleAvatarMap[currentUserRole] || 'AD';
+  const navRoleEl = document.getElementById('activeRoleNavLabel');
+  if (navRoleEl) navRoleEl.textContent = roleShortMap[currentUserRole] || 'Admin';
+  const bcRoleEl = document.getElementById('breadcrumbRole');
+  if (bcRoleEl) bcRoleEl.textContent = roleShortMap[currentUserRole] || 'Admin';
+
+  const navFinanceBtn = document.getElementById('navFinanceBtn');
+  if (navFinanceBtn) navFinanceBtn.classList.toggle('hidden', currentUserRole === 'warehouse');
+  const sideFinanceBtn = document.getElementById('sideFinanceBtn');
+  if (sideFinanceBtn) sideFinanceBtn.classList.toggle('hidden', currentUserRole === 'warehouse');
+
   const titles = {
-    overview: ['Tổng quan trực quan', 'Nắm nhanh lợi nhuận, biểu đồ dòng tiền và những việc cần xử lý ngay.'],
-    orders: ['Note đơn · Tính lãi tự động', 'Quản lý đơn Xách tay / Thanh toán hộ, tự tính lãi cước, phí dịch vụ %, lãi tỷ giá tệ và công nợ.'],
-    finance: ['Thu chi, Công nợ & Báo cáo AI', 'Theo dõi minh bạch dòng tiền theo Ngày / Tháng / Năm, biểu đồ phân tích và lịch sử chỉnh sửa.'],
-    shipments: ['Đơn ký gửi kho', 'Theo dõi mã vận đơn Trung Quốc, tiến độ kho và giao hàng.'],
-    purchases: ['Yêu cầu mua hộ', 'Báo giá link sản phẩm, xác nhận thanh toán và chuyển sang tính lãi 1 chạm.'],
-    customers: ['Danh bạ khách hàng', 'Tổng hợp số lượng đơn, số điện thoại và công nợ theo từng khách.']
+    overview: ['DAIRYCOW LOGISTICS · Dashboard Vận Hành', 'Hệ thống quản lý vận đơn ký gửi (WMS), dịch vụ đóng gói, dòng tiền và lợi nhuận thời gian thực.'],
+    orders: ['Note đơn · Dịch vụ Đóng gói & Tính lãi', 'Quản lý đơn Xách tay / Thanh toán hộ / Ký gửi, gắn vật tư đóng gói, cước ship phát sinh và tự tính lãi.'],
+    incidentals: ['Quản lý Chi phí phát sinh & Lợi nhuận Đóng gói', 'Quản lý Cước ship phát sinh và 3 danh mục Đóng hộp gỗ, Đóng hộp carton, Chống sốc.'],
+    finance: ['Thu chi, Công nợ & Báo cáo Lợi nhuận', 'Theo dõi minh bạch dòng tiền theo Ngày / Tháng / Năm, lãi dịch vụ đóng gói và lịch sử chỉnh sửa.'],
+    shipments: ['Quản lý Đơn ký gửi kho (WMS)', 'Theo dõi mã vận đơn Trung Quốc - Việt Nam, quy cách đóng gói và tiến độ xuất nhập kho.'],
+    purchases: ['Quản lý Yêu cầu mua hộ (OMS)', 'Báo giá link sản phẩm Taobao/1688/Pinduoduo, xác nhận thanh toán và chuyển sang tính lãi 1 chạm.'],
+    customers: ['Danh bạ khách hàng & Công nợ', 'Tổng hợp mã khách hàng DR, số lượng đơn, số điện thoại và công nợ theo từng khách.']
   };
 
-  document.getElementById('pageTitle').textContent = titles[view][0];
-  document.getElementById('pageDesc').textContent = titles[view][1];
+  const bcCurrentMap = {
+    overview: 'Dashboard',
+    orders: 'Note đơn & Đóng gói',
+    incidentals: 'Chi phí phát sinh',
+    finance: 'Thu chi & Báo cáo',
+    shipments: 'Đơn ký gửi kho',
+    purchases: 'Yêu cầu mua hộ',
+    customers: 'Khách hàng'
+  };
+  const bcCurEl = document.getElementById('breadcrumbCurrent');
+  if (bcCurEl) bcCurEl.textContent = bcCurrentMap[view] || 'Dashboard';
+
+  document.getElementById('pageTitle').textContent = (titles[view] || titles.overview)[0];
+  document.getElementById('pageDesc').textContent = (titles[view] || titles.overview)[1];
 
   const actionsEl = document.getElementById('pageActions');
   if (view === 'overview') {
     actionsEl.innerHTML = `
-      <button type="button" class="btn" onclick="openNew('finance')">＋ Ghi thu / chi</button>
+      <button type="button" class="btn" onclick="setView('incidentals',document.querySelector('[data-view=incidentals]'))">🪵 Chi phí phát sinh</button>
+      <button type="button" class="btn" onclick="openNew('shipment')">＋ Đơn ký gửi</button>
       <button id="addBtn" type="button" class="btn primary" onclick="openNew('order')">＋ Tạo Note đơn mới</button>
     `;
   } else if (view === 'orders') {
-    actionsEl.innerHTML = `<button id="addBtn" type="button" class="btn primary" onclick="openNew('order')">＋ Tạo Note đơn mới</button>`;
+    actionsEl.innerHTML = `
+      <button type="button" class="btn" onclick="openNew('extraship')">＋ Cước ship phát sinh</button>
+      <button id="addBtn" type="button" class="btn primary" onclick="openNew('order')">＋ Tạo Note đơn mới</button>
+    `;
+  } else if (view === 'incidentals') {
+    if (incTab === 'extraship') {
+      actionsEl.innerHTML = `<button id="addBtn" type="button" class="btn primary" onclick="openNew('extraship')">＋ Thêm Cước ship phát sinh</button>`;
+    } else {
+      const catNames = { wood: 'Đóng hộp gỗ', carton: 'Đóng hộp carton', shock: 'Chống sốc' };
+      actionsEl.innerHTML = `<button id="addBtn" type="button" class="btn primary" onclick="openNewPackItem('${incTab}')">＋ Thêm SP ${catNames[incTab] || 'Đóng gói'}</button>`;
+    }
   } else if (view === 'finance') {
     actionsEl.innerHTML = `
       <button type="button" class="btn" onclick="openNew('order')">＋ Note đơn</button>
@@ -1027,11 +1661,11 @@ function render() {
     `;
   } else if (view === 'customers') {
     actionsEl.innerHTML = `
-      <button type="button" class="btn" onclick="openNew('shipment')">＋ Vận đơn</button>
+      <button type="button" class="btn" onclick="openNew('shipment')">＋ Vận đơn ký gửi</button>
       <button id="addBtn" type="button" class="btn primary" onclick="openNew('order')">＋ Note đơn cho khách</button>
     `;
   } else {
-    const label = view === 'purchases' ? '＋ Thêm yêu cầu mua hộ' : '＋ Thêm vận đơn';
+    const label = view === 'purchases' ? '＋ Thêm yêu cầu mua hộ' : '＋ Thêm đơn ký gửi';
     const kind = view === 'purchases' ? 'purchase' : 'shipment';
     actionsEl.innerHTML = `<button id="addBtn" type="button" class="btn primary" onclick="openNew('${kind}')">${label}</button>`;
   }
@@ -1039,6 +1673,7 @@ function render() {
   document.getElementById('content').innerHTML =
     view === 'overview' ? overviewPage() :
     view === 'orders' ? ordersPage() :
+    view === 'incidentals' ? incidentalsPage() :
     view === 'finance' ? financePage() :
     view === 'shipments' ? shipmentsPage() :
     view === 'purchases' ? purchasesPage() :
@@ -1057,18 +1692,18 @@ function kpiCard(label, val, sub, icon, tone = 'blue', onClick = '') {
 }
 
 // ============================================================================
-// TRANG 1: TỔNG QUAN TRỰC QUAN (BIỂU ĐỒ MÀU SẮC + VIỆC CẦN LÀM GỌN GÀNG)
+// TRANG 1: DASHBOARD TỔNG QUAN (CHUẨN COREUI & CREATIVE TIM)
 // ============================================================================
 function overviewPage() {
   const curMonth = dateKey().slice(0, 7);
   const s = calcPeriodFinancials(curMonth);
   const allStats = calcPeriodFinancials('');
-  // Nếu tháng hiện tại chưa có đơn nào (ví dụ dữ liệu ở tháng khác), hiển thị biểu đồ toàn thời gian để luôn trực quan
-  const chartStats = (s.orderCount > 0 || s.txCount > 0) ? s : allStats;
-  const chartPeriodLabel = (s.orderCount > 0 || s.txCount > 0) ? `Tháng ${curMonth.split('-')[1]}/${curMonth.split('-')[0]}` : 'Toàn bộ dữ liệu';
+  const activeStats = calcPeriodFinancials(getActivePeriodPrefix());
+  const chartStats = (activeStats.orderCount > 0 || activeStats.txCount > 0) ? activeStats : ((s.orderCount > 0 || s.txCount > 0) ? s : allStats);
+  const chartPeriodLabel = (activeStats.orderCount > 0 || activeStats.txCount > 0) ? getPeriodLabel() : ((s.orderCount > 0 || s.txCount > 0) ? `Tháng ${curMonth.split('-')[1]}/${curMonth.split('-')[0]}` : 'Toàn bộ dữ liệu');
 
   const allPending = getPendingItems();
-  const hasAnyDebt = m => m.customerDebt > 0 || m.warehouseDebt > 0 || m.partnerDebt > 0;
+  const hasAnyDebt = m => m.customerDebt > 0 || m.warehouseDebt > 0;
   const filteredPending = allPending.filter(x =>
     todoFilter === 'all' ? true :
     todoFilter === 'debt' ? (x.kind === 'order' && hasAnyDebt(x.metrics)) :
@@ -1080,54 +1715,23 @@ function overviewPage() {
   const recentLogs = (db.logs || []).slice(0, 6);
 
   return `<div class="section-stack">
-    <div class="kpi-grid">
-      ${kpiCard(
-        `Lợi nhuận thực tế (${chartPeriodLabel})`,
-        `${chartStats.netProfit >= 0 ? '+' : ''}${money(chartStats.netProfit)} ₫`,
-        `Cước +${shortMoney(chartStats.shipProfitTotal)} · DV +${shortMoney(chartStats.totalServiceRevenue)} · Tệ +${shortMoney(chartStats.fxProfitTotal)}`,
-        '📈',
-        'emerald',
-        "openFinanceSubtab('report')"
-      )}
-      ${kpiCard(
-        `Đã thu từ khách (${chartPeriodLabel})`,
-        `${money(chartStats.totalCollectedFromCustomer)} ₫`,
-        `Tổng phát sinh phải thu: ${money(chartStats.totalBilledCustomer)} ₫`,
-        '💰',
-        'blue',
-        "openFinanceSubtab('cashflow')"
-      )}
-      ${kpiCard(
-        'Khách còn nợ chưa thu',
-        `${money(allStats.allCustomerDebt)} ₫`,
-        allStats.allWarehouseUnpaid > 0 ? `Cước kho chưa trả: ${money(allStats.allWarehouseUnpaid)} ₫` : '✓ Đã trả hết cước kho',
-        '🤝',
-        allStats.allCustomerDebt > 0 ? 'rose' : 'amber',
-        "openFinanceSubtab('debts')"
-      )}
-      ${kpiCard(
-        'Việc & Đơn đang xử lý',
-        `${allPending.length} mục`,
-        `${(db.orderNotes || []).length} Note đơn · ${(db.shipments || []).length} Ký gửi · ${(db.purchases || []).length} Mua hộ`,
-        '⚡',
-        'violet',
-        "setView('orders',document.querySelector('[data-view=orders]'))"
-      )}
-    </div>
+    ${renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPending.length)}
+
+    ${renderTrafficChartCard(chartStats, chartPeriodLabel)}
+
+    ${renderCoreUiChannelCards()}
 
     <div class="visual-grid">
       ${renderProfitDonutChart(chartStats, chartPeriodLabel)}
-      ${renderCashflowBarChart('')}
+      ${renderOrderPipelineBar()}
     </div>
-
-    ${renderOrderPipelineBar()}
 
     <div class="overview-split">
       <section class="panel">
         <div class="panel-head">
           <div>
-            <div class="panel-title">📌 Việc cần xử lý & Công nợ mở</div>
-            <div class="panel-sub">Đổi nhanh trạng thái hoặc bấm "Thu đủ" ngay trên dòng mà không cần mở form</div>
+            <div class="panel-title">📌 Tasks · Việc cần xử lý & Công nợ mở</div>
+            <div class="panel-sub">Đổi nhanh trạng thái hoặc bấm "Thu đủ" / "Trả kho" ngay trên dòng mà không cần mở form</div>
           </div>
           <div class="stage-strip" style="padding:0">
             <button type="button" class="chip ${todoFilter === 'all' ? 'active' : ''}" onclick="todoFilter='all';render()">Tất cả <span class="chip-count">${allPending.length}</span></button>
@@ -1142,24 +1746,26 @@ function overviewPage() {
             const m = item.metrics;
             return `<div class="todo-row">
               <div class="todo-left">
-                ${linePill(item.lineType)}
                 <div class="todo-info">
                   <div class="todo-title">
                     <span>${esc(item.customer)}</span>
+                    ${linePill(item.lineType)}
                     <span class="code">${esc(item.packages || 1)} kiện · ${esc(item.goodsType)}</span>
+                    ${item.packagingType && item.packagingType !== 'Tiêu chuẩn (Miễn phí)' ? `<span class="pack-pill">🪵 ${esc(item.packagingType)}</span>` : ''}
                   </div>
                   <div class="todo-meta">
-                    Lãi: <b class="income-color">+${money(m.netProfit)} ₫</b>
-                    ${m.customerDebt > 0 ? ` · <b class="expense-color">Khách nợ ${money(m.customerDebt)} ₫</b>` : ''}
-                    ${m.warehouseDebt > 0 ? ` · <span class="amber-color">Nợ kho ${money(m.warehouseDebt)} ₫</span>` : ''}
-                    ${m.partnerDebt > 0 ? ` · <span class="amber-color">Chưa chuyển vốn ${money(m.partnerDebt)} ₫</span>` : ''}
-                    ${item.updatedAt ? ` · 🕒 ${esc(item.updatedAt)}` : ''}
+                    <span>${currentUserRole !== 'warehouse' ? `Lãi: <b class="income-color">+${money(m.netProfit)} ₫</b>` : `Cước VC: <b>${money(m.shipCharge)} ₫</b>`}</span>
+                    ${m.packProfit > 0 && currentUserRole !== 'warehouse' ? `<span>(Lãi ĐG: +${money(m.packProfit)} ₫)</span>` : ''}
+                    ${m.customerDebt > 0 ? `<span class="expense-color">· <b>Khách nợ ${money(m.customerDebt)} ₫</b></span>` : ''}
+                    ${m.warehouseDebt > 0 ? `<span class="amber-color">· <b>Nợ kho ${money(m.warehouseDebt)} ₫</b></span>` : ''}
+                    ${item.updatedAt ? `<span>· 🕒 ${esc(item.updatedAt)}</span>` : ''}
                   </div>
                 </div>
               </div>
               <div class="todo-right">
                 ${statusSelect('order', item.id, item.status, orderStages)}
                 ${m.customerDebt > 0 ? `<button type="button" class="iconbtn primary-tint" onclick="settleOrderDebt('${item.id}','customer')">Thu đủ</button>` : ''}
+                ${m.warehouseDebt > 0 ? `<button type="button" class="iconbtn" onclick="settleOrderDebt('${item.id}','warehouse')">Trả kho</button>` : ''}
                 <button type="button" class="iconbtn" onclick="editRecord('order','${item.id}')">Sửa</button>
               </div>
             </div>`;
@@ -1167,13 +1773,17 @@ function overviewPage() {
           const isShip = item.kind === 'shipment';
           return `<div class="todo-row">
             <div class="todo-left">
-              <span class="line-pill line-other">${isShip ? '📦 Ký gửi' : '🛍 Mua hộ'}</span>
               <div class="todo-info">
                 <div class="todo-title">
                   <span>${esc(item.customer)}</span>
+                  <span class="line-pill line-other">${isShip ? '📦 Ký gửi' : '🛍 Mua hộ'}</span>
                   <span class="code">${esc(item.product)}</span>
+                  ${item.packagingType && item.packagingType !== 'Tiêu chuẩn (Miễn phí)' ? `<span class="pack-pill">🪵 ${esc(item.packagingType)}</span>` : ''}
                 </div>
-                <div class="todo-meta">${isShip ? `Mã VĐ: ${esc(item.waybill)}` : `Giá: ¥${numFmt(item.value)}${item.quote ? ` · Báo: ¥${numFmt(item.quote)}` : ''}`}${item.updatedAt ? ` · 🕒 ${esc(item.updatedAt)}` : ''}</div>
+                <div class="todo-meta">
+                  <span>${isShip ? `Mã VĐ: <b>${esc(item.waybill)}</b>` : `Giá: <b>¥${numFmt(item.value)}</b>${item.quote ? ` · Báo: <b>¥${numFmt(item.quote)}</b>` : ''}`}</span>
+                  ${item.updatedAt ? `<span>· 🕒 ${esc(item.updatedAt)}</span>` : ''}
+                </div>
               </div>
             </div>
             <div class="todo-right">
@@ -1217,16 +1827,18 @@ function loadSampleOrderNotes() {
 }
 
 // ============================================================================
-// TRANG 2: MỤC NOTE ĐƠN · BẢNG TÍNH LÃI (5 CỘT THOÁNG ĐÃNG, DỄ ĐỌC)
+// TRANG 2: MỤC NOTE ĐƠN · DỊCH VỤ ĐÓNG GÓI & BẢNG TÍNH LÃI
 // ============================================================================
 function getOrdersViewData() {
   const q = query.toLowerCase();
   const all = db.orderNotes || [];
   const filtered = all.filter(o => {
-    const text = `${o.lineType} ${o.customer} ${o.phone || ''} ${o.code || ''} ${o.waybill || ''} ${o.goodsType} ${o.product || ''} ${o.note || ''} ${o.status}`.toLowerCase();
+    const packNames = Array.isArray(o.packagingItems) ? o.packagingItems.map(x => x.name).join(' ') : '';
+    const text = `${o.lineType} ${o.customer} ${o.phone || ''} ${o.code || ''} ${o.waybill || ''} ${o.goodsType} ${o.packagingType || ''} ${packNames} ${o.product || ''} ${o.note || ''} ${o.status}`.toLowerCase();
     if (q && !text.includes(q)) return false;
     if (!window.statusFilter) return true;
     if (window.statusFilter.startsWith('__line_')) return o.lineType === window.statusFilter.replace('__line_', '');
+    if (window.statusFilter === '__pack') return (Array.isArray(o.packagingItems) && o.packagingItems.length > 0) || parseNum(o.packCharge) > 0 || (o.packagingType && o.packagingType !== 'Tiêu chuẩn (Miễn phí)');
     if (window.statusFilter === '__pipe_wait') return ['Mới tạo / Chờ xử lý', 'Chờ khách thanh toán'].includes(o.status);
     if (window.statusFilter === '__pipe_ship') return ['Đã thanh toán hộ', 'Đang vận chuyển'].includes(o.status);
     if (window.statusFilter === '__pipe_vn') return o.status === 'Đã về kho VN';
@@ -1234,36 +1846,45 @@ function getOrdersViewData() {
     if (window.statusFilter === '__debt') {
       if (o.status === 'Đã hủy') return false;
       const m = calcOrderMetrics(o);
-      return m.customerDebt > 0 || m.warehouseDebt > 0 || m.partnerDebt > 0;
+      return m.customerDebt > 0 || m.warehouseDebt > 0;
     }
     return o.status === window.statusFilter;
   }).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
   const rows = filtered.map(o => {
     const m = calcOrderMetrics(o);
-    const posTotal = Math.max(1, Math.max(0, m.shipProfit) + Math.max(0, m.serviceFee) + Math.max(0, m.fxProfit));
+    const posTotal = Math.max(1, Math.max(0, m.shipProfit) + Math.max(0, m.serviceFee) + Math.max(0, m.packProfit) + Math.max(0, m.fxProfit));
     const wShip = Math.round((Math.max(0, m.shipProfit) / posTotal) * 100);
     const wFee = Math.round((Math.max(0, m.serviceFee) / posTotal) * 100);
-    const wFx = Math.max(0, 100 - wShip - wFee);
+    const wPack = Math.round((Math.max(0, m.packProfit) / posTotal) * 100);
+    const wFx = Math.max(0, 100 - wShip - wFee - wPack);
+    const pItems = Array.isArray(o.packagingItems) ? o.packagingItems : [];
+    const hasPack = pItems.length > 0 || (o.packagingType && o.packagingType !== 'Tiêu chuẩn (Miễn phí)') || m.packCharge > 0 || m.packCost > 0;
+    const packSummaryText = pItems.length > 0
+      ? pItems.map(it => `${numFmt(it.qty)} ${it.name}`).join(' · ')
+      : (o.packagingType || 'Đóng gói kỹ');
 
     return `<tr>
       <td data-label="Khách & Kiện hàng">
         <div class="customer">
           <div class="mini-avatar">${avatar(o.customer)}</div>
           <div>
-            <div class="person">${esc(o.customer)} ${linePill(o.lineType)}</div>
+            <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || '—')}</span> ${linePill(o.lineType)}</div>
             <div class="subline"><b>${esc(o.packages || 1)} kiện</b> · ${esc(o.goodsType)}${o.product ? ' · ' + esc(o.product) : ''}</div>
+            ${hasPack ? `<div style="margin-top:3px"><span class="pack-pill">🪵 ${esc(packSummaryText)}${m.packCharge > 0 ? ` (+${money(m.packCharge)} ₫)` : ''}</span></div>` : ''}
             <div class="subline">Ngày: ${dateText(o.date)}${o.waybill ? ` · VĐ: <a class="link" target="_blank" rel="noopener" href="https://www.17track.net/en#nums=${encodeURIComponent(o.waybill)}">${esc(o.waybill)} ↗</a>` : ''}</div>
           </div>
         </div>
       </td>
-      <td data-label="Giá hàng & Cước VC">
+      <td data-label="Giá hàng, Cước & Đóng gói">
         <div>Hàng: <b>${money(m.finalGoodsVnd)} ₫</b> ${parseNum(o.goodsCny) > 0 ? `<span class="code">¥${numFmt(o.goodsCny)}${parseNum(o.rateSell) > 0 ? ' × ' + money(o.rateSell) : ''}</span>` : ''}</div>
         <div class="subline">Cước thu: <b>${money(m.shipCharge)} ₫</b> (Gốc kho: ${money(m.shipCost)} ₫)</div>
-        ${parseNum(o.goodsCny) > 0 && parseNum(o.rateBuy) > 0 ? `<div class="subline">Tỷ giá gốc: ${money(o.rateBuy)} · Báo khách: ${money(o.rateSell)}</div>` : ''}
+        ${hasPack ? `<div class="subline">Đóng gói: Thu <b>${money(m.packCharge)} ₫</b> · Vốn <b>${money(m.packCost)} ₫</b> (Lãi: +${money(m.packProfit)} ₫)</div>` : ''}
+        ${m.extraShipTotal > 0 ? `<div class="subline">🚚 Cước ship phát sinh: <b>+${money(m.extraShipTotal)} ₫</b></div>` : ''}
       </td>
       <td data-label="Phải thu & Công nợ">
-        <div>Tổng thu: <b>${money(m.totalCollectCustomer)} ₫</b></div>
+        <div>Phải thu khách: <b>${money(m.totalCollectCustomer)} ₫</b></div>
+        ${m.shipCharge > 0 ? `<div class="subline" title="Cước vận chuyển tính riêng, không gộp vào nợ khách">🚚 Cước VC riêng: <b>${money(m.shipCharge)} ₫</b></div>` : ''}
         <div>
           ${o.status === 'Đã hủy'
             ? `<span class="code">Đã hủy đơn</span>`
@@ -1272,19 +1893,19 @@ function getOrdersViewData() {
               : m.totalCollectCustomer > 0
                 ? `<span class="debt-pill ok">✓ Đã thu đủ</span>`
                 : `<span class="subline">Chưa nhập phí thu</span>`}
-          ${m.warehouseDebt > 0 ? `<span class="debt-pill ware">Nợ kho ${shortMoney(m.warehouseDebt)}</span>` : ''}
-          ${m.partnerDebt > 0 ? `<span class="debt-pill ware">Chưa chuyển vốn ${shortMoney(m.partnerDebt)}</span>` : ''}
+          ${m.warehouseDebt > 0 ? `<span class="debt-pill ware">Chưa trả cước kho ${shortMoney(m.warehouseDebt)}</span>` : `<span class="debt-pill ok">✓ Đã trả cước kho</span>`}
         </div>
       </td>
       <td data-label="Lợi nhuận thực tế">
         <div class="profit-num ${m.netProfit >= 0 ? 'income-color' : 'expense-color'}">${m.netProfit >= 0 ? '+' : ''}${money(m.netProfit)} ₫</div>
-        <div class="mini-profit-bar" title="Xanh dương: Lãi cước · Xanh lá: Phí DV · Vàng: Lãi tệ">
-          <span style="width:${wShip}%;background:#3b82f6"></span>
-          <span style="width:${wFee}%;background:#10b981"></span>
-          <span style="width:${wFx}%;background:#f59e0b"></span>
+        <div class="mini-profit-bar" title="Xanh dương: Lãi cước · Xanh lá: Phí DV · Đỏ cam: Lãi đóng gói · Vàng: Lãi tệ">
+          <span style="width:${wShip}%;background:#20a8d8"></span>
+          <span style="width:${wFee}%;background:#4dbd74"></span>
+          <span style="width:${wPack}%;background:#f86c6b"></span>
+          <span style="width:${wFx}%;background:#f8cb00"></span>
         </div>
         <div class="subline">
-          Cước ${m.shipProfit >= 0 ? '+' : ''}${shortMoney(m.shipProfit)} · DV +${shortMoney(m.serviceFee)}${o.serviceFeePct ? ` (${numFmt(o.serviceFeePct)}%)` : ''}${m.fxProfit ? ` · Tệ +${shortMoney(m.fxProfit)}` : ''}${m.extraCost ? ` · Chi −${shortMoney(m.extraCost)}` : ''}
+          Cước ${m.shipProfit >= 0 ? '+' : ''}${shortMoney(m.shipProfit)} · DV +${shortMoney(m.serviceFee)}${o.serviceFeePct ? ` (${numFmt(o.serviceFeePct)}%)` : ''}${m.packProfit ? ` · ĐG ${m.packProfit >= 0 ? '+' : ''}${shortMoney(m.packProfit)}` : ''}${m.fxProfit ? ` · Tệ +${shortMoney(m.fxProfit)}` : ''}${m.extraCost ? ` · Chi −${shortMoney(m.extraCost)}` : ''}
         </div>
       </td>
       <td data-label="Trạng thái & Thao tác">
@@ -1294,8 +1915,7 @@ function getOrdersViewData() {
           ${o.updatedAt ? `<span class="ts-stamp">🕒 ${esc(o.updatedAt)}</span>` : ''}
           <div class="row-actions" style="margin-top:2px">
             ${m.customerDebt > 0 ? `<button type="button" class="iconbtn primary-tint" onclick="settleOrderDebt('${o.id}','customer')">Thu đủ</button>` : ''}
-            ${m.warehouseDebt > 0 ? `<button type="button" class="iconbtn" onclick="settleOrderDebt('${o.id}','warehouse')">Trả kho</button>` : ''}
-            ${m.partnerDebt > 0 ? `<button type="button" class="iconbtn" onclick="settleOrderDebt('${o.id}','partner')">Đã chuyển tệ</button>` : ''}
+            ${m.warehouseDebt > 0 ? `<button type="button" class="iconbtn" onclick="settleOrderDebt('${o.id}','warehouse')">Đã trả cước kho</button>` : ''}
             <button type="button" class="iconbtn" onclick="editRecord('order','${o.id}')">Sửa</button>
             <button type="button" class="iconbtn danger-tint" onclick="deleteItemDirect('order','${o.id}')">Xóa</button>
           </div>
@@ -1304,13 +1924,13 @@ function getOrdersViewData() {
     </tr>`;
   }).join('');
 
-  const headers = '<th>Khách & Kiện hàng</th><th>Giá trị hàng & Cước VC</th><th>Phải thu & Công nợ</th><th>Lợi nhuận thực tế</th><th>Trạng thái, Ghi chú & Thao tác</th>';
+  const headers = '<th>Khách & Kiện hàng</th><th>Giá trị hàng, Cước & Đóng gói</th><th>Phải thu & Công nợ</th><th>Lợi nhuận thực tế</th><th>Trạng thái, Ghi chú & Thao tác</th>';
   const hasFilter = Boolean(query || window.statusFilter);
   const tableHtml = `<table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>` +
     (rows ? '' : `<div class="empty">
       <div class="empty-ico">${hasFilter ? '🔎' : '🧮'}</div>
       <strong>${hasFilter ? 'Không tìm thấy Note đơn phù hợp' : 'Chưa có Note đơn nào'}</strong>
-      <p>${hasFilter ? 'Thử đổi từ khóa hoặc đặt lại bộ lọc.' : 'Tạo Note đơn để tự động tính lãi cước, phí dịch vụ %, lãi tỷ giá tệ và theo dõi công nợ.'}</p>
+      <p>${hasFilter ? 'Thử đổi từ khóa hoặc đặt lại bộ lọc.' : 'Tạo Note đơn để tự động tính lãi cước, lãi dịch vụ đóng gói, phí dịch vụ %, lãi tỷ giá tệ và theo dõi công nợ.'}</p>
       <div class="row-actions" style="justify-content:center">
         ${hasFilter
           ? `<button type="button" class="btn small" onclick="clearFilters()">Xóa bộ lọc</button>`
@@ -1327,34 +1947,38 @@ function ordersPage() {
   const all = db.orderNotes || [];
   const xtCount = all.filter(x => x.lineType === 'Xách tay').length;
   const tthCount = all.filter(x => x.lineType === 'Thanh toán hộ').length;
+  const kgCount = all.filter(x => x.lineType === 'Ký gửi kho').length;
+  const packCount = all.filter(x => (Array.isArray(x.packagingItems) && x.packagingItems.length > 0) || parseNum(x.packCharge) > 0 || (x.packagingType && x.packagingType !== 'Tiêu chuẩn (Miễn phí)')).length;
   const debtCount = all.filter(x => {
     if (x.status === 'Đã hủy') return false;
     const m = calcOrderMetrics(x);
-    return m.customerDebt > 0 || m.warehouseDebt > 0 || m.partnerDebt > 0;
+    return m.customerDebt > 0 || m.warehouseDebt > 0;
   }).length;
   const data = getOrdersViewData();
   const hasFilter = Boolean(query || window.statusFilter);
 
   return `<div class="section-stack">
-    <div class="stage-strip" aria-label="Lọc nhanh theo Line và Công nợ">
+    <div class="stage-strip" aria-label="Lọc nhanh theo Line, Đóng gói và Công nợ">
       <button type="button" class="chip ${window.statusFilter === '' ? 'active' : ''}" onclick="setFilter('')">Tất cả đơn <span class="chip-count">${all.length}</span></button>
       <button type="button" class="chip ${window.statusFilter === '__line_Xách tay' ? 'active' : ''}" onclick="setFilter('__line_Xách tay')">✈️ Xách tay <span class="chip-count">${xtCount}</span></button>
       <button type="button" class="chip ${window.statusFilter === '__line_Thanh toán hộ' ? 'active' : ''}" onclick="setFilter('__line_Thanh toán hộ')">💴 Thanh toán hộ <span class="chip-count">${tthCount}</span></button>
+      <button type="button" class="chip ${window.statusFilter === '__line_Ký gửi kho' ? 'active' : ''}" onclick="setFilter('__line_Ký gửi kho')">📦 Ký gửi kho <span class="chip-count">${kgCount}</span></button>
+      <button type="button" class="chip ${window.statusFilter === '__pack' ? 'active' : ''}" onclick="setFilter('__pack')">🪵 Dịch vụ đóng gói <span class="chip-count">${packCount}</span></button>
       <button type="button" class="chip ${window.statusFilter === '__debt' ? 'active' : ''}" onclick="setFilter('__debt')">⚠️ Còn công nợ <span class="chip-count">${debtCount}</span></button>
     </div>
 
     <section class="panel">
       <div class="panel-head">
         <div>
-          <div class="panel-title">Danh sách Note đơn & Minh bạch lãi lỗ</div>
-          <div class="panel-sub">Thanh màu dưới số lãi thể hiện tỷ lệ: <b style="color:#2563eb">Lãi cước</b> · <b style="color:#059669">Phí dịch vụ</b> · <b style="color:#d97706">Lãi tỷ giá tệ</b></div>
+          <div class="panel-title">Danh sách Note đơn · Dịch vụ Đóng gói & Minh bạch lãi lỗ</div>
+          <div class="panel-sub">Thanh màu dưới số lãi thể hiện tỷ lệ: <b style="color:#20a8d8">Lãi cước</b> · <b style="color:#4dbd74">Phí dịch vụ</b> · <b style="color:#f86c6b">Lãi đóng gói</b> · <b style="color:#d97706">Lãi tỷ giá tệ</b></div>
         </div>
         <span class="result-count" id="resultCount">${data.filteredCount} / ${data.totalCount} đơn</span>
       </div>
       <div class="filters">
         <div class="search">
           <span class="search-ico" aria-hidden="true">⌕</span>
-          <input id="searchInput" class="field" placeholder="Tìm khách hàng, loại hàng (quần áo, mỹ phẩm...), ghi chú…" value="${esc(query)}" oninput="handleSearch(this)">
+          <input id="searchInput" class="field" placeholder="Tìm khách hàng, loại hàng, quy cách đóng gói, mã vận đơn…" value="${esc(query)}" oninput="handleSearch(this)">
           <button type="button" id="searchClearBtn" class="search-clear ${query ? '' : 'hidden'}" onclick="clearSearchInput()" title="Xóa từ khóa">×</button>
         </div>
         <select class="select" aria-label="Lọc trạng thái đơn" onchange="setFilter(this.value)">
@@ -1363,6 +1987,451 @@ function ordersPage() {
           ${orderStages.map(s => `<option value="${esc(s)}" ${window.statusFilter === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
         </select>
         <button type="button" id="resetFilterBtn" class="btn subtle small ${hasFilter ? '' : 'hidden'}" onclick="clearFilters()">Đặt lại lọc</button>
+      </div>
+      <div class="table-wrap" id="tableArea">${data.tableHtml}</div>
+    </section>
+  </div>`;
+}
+
+// ============================================================================
+// TRANG 2B: CHI PHÍ PHÁT SINH & QUẢN LÝ LỢI NHUẬN ĐÓNG GÓI (4 TAB RIÊNG BIỆT)
+// ============================================================================
+function matchIncidentalDate(dStr) {
+  if (incPeriodMode === 'all') return true;
+  const d = String(dStr || dateKey()).slice(0, 10);
+  if (incPeriodMode === 'day') return d === incDate;
+  if (incPeriodMode === 'month') return d.startsWith(incMonth);
+  if (incPeriodMode === 'custom') {
+    const from = incFromDate || '0000-01-01';
+    const to = incToDate || '9999-12-31';
+    return d >= from && d <= to;
+  }
+  if (incPeriodMode === 'week') {
+    const ref = new Date((incWeekDate || dateKey()) + 'T00:00:00');
+    const dayOfWeek = ref.getDay() || 7; // 1 (Mon) .. 7 (Sun)
+    const mon = new Date(ref);
+    mon.setDate(ref.getDate() - dayOfWeek + 1);
+    const sun = new Date(mon);
+    sun.setDate(mon.getDate() + 6);
+    const from = dateKey(mon);
+    const to = dateKey(sun);
+    return d >= from && d <= to;
+  }
+  return true;
+}
+
+function getIncPeriodLabel() {
+  if (incPeriodMode === 'day') return `Ngày ${dateText(incDate)}`;
+  if (incPeriodMode === 'week') {
+    const ref = new Date((incWeekDate || dateKey()) + 'T00:00:00');
+    const dayOfWeek = ref.getDay() || 7;
+    const mon = new Date(ref);
+    mon.setDate(ref.getDate() - dayOfWeek + 1);
+    const sun = new Date(mon);
+    sun.setDate(mon.getDate() + 6);
+    return `Tuần (${dateText(dateKey(mon))} – ${dateText(dateKey(sun))})`;
+  }
+  if (incPeriodMode === 'month') {
+    const [y, m] = (incMonth || dateKey().slice(0, 7)).split('-');
+    return `Tháng ${m}/${y}`;
+  }
+  if (incPeriodMode === 'custom') return `Từ ${dateText(incFromDate)} đến ${dateText(incToDate)}`;
+  return 'Toàn bộ thời gian';
+}
+
+function renderIncPeriodPicker() {
+  return `<div class="period-bar">
+    <button type="button" class="chip ${incPeriodMode === 'day' ? 'active' : ''}" onclick="incPeriodMode='day';render()">Ngày</button>
+    <button type="button" class="chip ${incPeriodMode === 'week' ? 'active' : ''}" onclick="incPeriodMode='week';render()">Tuần</button>
+    <button type="button" class="chip ${incPeriodMode === 'month' ? 'active' : ''}" onclick="incPeriodMode='month';render()">Tháng</button>
+    <button type="button" class="chip ${incPeriodMode === 'custom' ? 'active' : ''}" onclick="incPeriodMode='custom';render()">Tùy chọn</button>
+    <button type="button" class="chip ${incPeriodMode === 'all' ? 'active' : ''}" onclick="incPeriodMode='all';render()">Tất cả</button>
+    ${incPeriodMode === 'day' ? `<input type="date" class="field" style="padding:5px 9px" value="${esc(incDate)}" onchange="incDate=this.value;render()">` : ''}
+    ${incPeriodMode === 'week' ? `<input type="date" class="field" style="padding:5px 9px" value="${esc(incWeekDate)}" title="Chọn 1 ngày bất kỳ trong tuần" onchange="incWeekDate=this.value;render()">` : ''}
+    ${incPeriodMode === 'month' ? `<input type="month" class="field" style="padding:5px 9px" value="${esc(incMonth)}" onchange="incMonth=this.value;render()">` : ''}
+    ${incPeriodMode === 'custom' ? `
+      <input type="date" class="field" style="padding:5px 9px" value="${esc(incFromDate)}" onchange="incFromDate=this.value;render()">
+      <span style="font-size:12px;color:var(--muted)">→</span>
+      <input type="date" class="field" style="padding:5px 9px" value="${esc(incToDate)}" onchange="incToDate=this.value;render()">
+    ` : ''}
+  </div>`;
+}
+
+// Tính thống kê tổng hợp Chi phí phát sinh & 3 danh mục Đóng gói (Bảo toàn lịch sử giá trên từng đơn hàng)
+function calcIncidentalsSummary() {
+  const catalog = db.packagingCatalog || [];
+  const catStats = {
+    wood: { cost: 0, rev: 0, profit: 0 },
+    carton: { cost: 0, rev: 0, profit: 0 },
+    shock: { cost: 0, rev: 0, profit: 0 }
+  };
+
+  // 1. Từ bảng danh mục đóng gói trực tiếp
+  catalog.forEach(item => {
+    if (!matchIncidentalDate(item.date)) return;
+    const cat = ['wood', 'carton', 'shock'].includes(item.category) ? item.category : 'wood';
+    const qty = Math.max(0, parseNum(item.qty));
+    const cost = Math.round(parseNum(item.costPrice) * qty);
+    const rev = Math.round(parseNum(item.sellPrice) * qty);
+    catStats[cat].cost += cost;
+    catStats[cat].rev += rev;
+    catStats[cat].profit += (rev - cost);
+  });
+
+  // 2. Từ các vật tư đóng gói đã gắn trực tiếp vào từng đơn hàng (dùng đúng giá nhập & giá bán tại thời điểm phát sinh)
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchIncidentalDate(o.date)).forEach(o => {
+    const pItems = Array.isArray(o.packagingItems) ? o.packagingItems : [];
+    pItems.forEach(it => {
+      const cat = ['wood', 'carton', 'shock'].includes(it.category) ? it.category : 'wood';
+      const qty = Math.max(0, parseNum(it.qty));
+      const cost = Math.round(parseNum(it.costPrice) * qty);
+      const rev = Math.round(parseNum(it.sellPrice) * qty);
+      catStats[cat].cost += cost;
+      catStats[cat].rev += rev;
+      catStats[cat].profit += (rev - cost);
+    });
+  });
+
+  const totalPackCost = catStats.wood.cost + catStats.carton.cost + catStats.shock.cost;
+  const totalPackRevenue = catStats.wood.rev + catStats.carton.rev + catStats.shock.rev;
+  const totalPackProfit = catStats.wood.profit + catStats.carton.profit + catStats.shock.profit;
+
+  // 3. Thống kê Cước ship phát sinh (Khách phải trả, không phải lợi nhuận mặc định)
+  const extraShips = (db.extraShipments || []).filter(x => matchIncidentalDate(x.date));
+  let totalExtraShip = 0;
+  let collectedExtraShip = 0;
+  extraShips.forEach(x => {
+    const amt = Math.round(parseNum(x.amount));
+    totalExtraShip += amt;
+    if (x.status === 'Đã thu') {
+      collectedExtraShip += amt;
+    } else if (x.status === 'Thu một phần') {
+      collectedExtraShip += Math.min(amt, Math.max(0, Math.round(parseNum(x.paidAmount))));
+    }
+  });
+  const uncollectedExtraShip = Math.max(0, totalExtraShip - collectedExtraShip);
+
+  return {
+    totalPackCost,
+    totalPackRevenue,
+    totalPackProfit,
+    woodProfit: catStats.wood.profit,
+    cartonProfit: catStats.carton.profit,
+    shockProfit: catStats.shock.profit,
+    woodStats: catStats.wood,
+    cartonStats: catStats.carton,
+    shockStats: catStats.shock,
+    totalExtraShip,
+    collectedExtraShip,
+    uncollectedExtraShip
+  };
+}
+
+function getExtraShipViewData() {
+  const q = query.toLowerCase();
+  const all = (db.extraShipments || []).filter(x => matchIncidentalDate(x.date));
+  const filtered = all.filter(x => {
+    const matchQ = `${x.orderCode || ''} ${x.customer || ''} ${x.content || ''} ${x.status || ''}`.toLowerCase().includes(q);
+    const matchStatus = !window.statusFilter ? true : x.status === window.statusFilter;
+    return matchQ && matchStatus;
+  }).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  const rows = filtered.map(x => {
+    const amt = Math.round(parseNum(x.amount));
+    const paid = x.status === 'Đã thu' ? amt : x.status === 'Thu một phần' ? Math.min(amt, Math.max(0, Math.round(parseNum(x.paidAmount)))) : 0;
+    const unpaid = Math.max(0, amt - paid);
+
+    return `<tr>
+      <td data-label="Mã đơn hàng">
+        <span class="code">${esc(x.orderCode || 'Chưa gắn mã')}</span>
+      </td>
+      <td data-label="Tên khách hàng">
+        <div class="person">${esc(x.customer || '—')}</div>
+      </td>
+      <td data-label="Nội dung phát sinh">
+        <div><b>${esc(x.content || 'Cước ship phát sinh')}</b></div>
+        ${x.updatedAt ? `<span class="ts-stamp">🕒 ${esc(x.updatedAt)}</span>` : ''}
+      </td>
+      <td data-label="Số tiền">
+        <div><b>${money(amt)} ₫</b></div>
+        ${x.status === 'Thu một phần' ? `<div class="subline">Đã thu: <b class="income-color">${money(paid)} ₫</b> · Còn thiếu: <b class="expense-color">${money(unpaid)} ₫</b></div>` : ''}
+      </td>
+      <td data-label="Ngày phát sinh">${dateText(x.date)}</td>
+      <td data-label="Trạng thái thanh toán">
+        ${statusSelect('extraship', x.id, x.status || 'Chưa thu', extraShipStatuses)}
+      </td>
+      <td data-label="Thao tác">
+        <div class="row-actions">
+          ${x.status !== 'Đã thu' ? `<button type="button" class="iconbtn primary-tint" onclick="settleExtraShip('${x.id}')">Thu đủ</button>` : ''}
+          <button type="button" class="iconbtn" onclick="editRecord('extraship','${x.id}')">Sửa</button>
+          <button type="button" class="iconbtn danger-tint" onclick="deleteExtraShip('${x.id}')">Xóa</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  const headers = '<th>Mã đơn hàng</th><th>Tên khách hàng</th><th>Nội dung phát sinh</th><th>Số tiền khách trả</th><th>Ngày phát sinh</th><th>Trạng thái thanh toán</th><th>Thao tác</th>';
+  const tableHtml = `<table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>` +
+    (rows ? '' : `<div class="empty">
+      <div class="empty-ico">🚚</div>
+      <strong>Chưa có khoản Cước ship phát sinh nào</strong>
+      <p>Thêm khoản phí vận chuyển phát sinh mà khách hàng cần thanh toán (tự động cộng vào số tiền khách cần trả của đơn hàng liên kết).</p>
+      <button type="button" class="btn small primary" onclick="openNew('extraship')">＋ Thêm Cước ship phát sinh</button>
+    </div>`);
+
+  return { totalCount: all.length, filteredCount: filtered.length, tableHtml };
+}
+
+function getPackagingTabViewData(cat) {
+  const q = query.toLowerCase();
+  const all = (db.packagingCatalog || []).filter(x => x.category === cat && matchIncidentalDate(x.date));
+  const filtered = all.filter(x => `${x.name} ${x.spec || ''} ${x.unit || ''} ${x.note || ''}`.toLowerCase().includes(q));
+
+  let sumCost = 0;
+  let sumRev = 0;
+  let sumProfit = 0;
+  let sumQty = 0;
+
+  const rows = filtered.map(x => {
+    const costPrice = Math.round(parseNum(x.costPrice));
+    const sellPrice = Math.round(parseNum(x.sellPrice));
+    const unitProfit = sellPrice - costPrice;
+
+    // Cộng thêm số lượng & doanh thu/giá vốn lịch sử từ các đơn hàng đã gắn sản phẩm này trong kỳ
+    let orderQty = 0;
+    let orderCost = 0;
+    let orderRev = 0;
+    (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchIncidentalDate(o.date)).forEach(o => {
+      (o.packagingItems || []).forEach(it => {
+        if (it.catalogId === x.id) {
+          const qUsed = Math.max(0, parseNum(it.qty));
+          orderQty += qUsed;
+          orderCost += Math.round(parseNum(it.costPrice) * qUsed);
+          orderRev += Math.round(parseNum(it.sellPrice) * qUsed);
+        }
+      });
+    });
+
+    const baseQty = Math.max(0, parseNum(x.qty));
+    const totalQty = baseQty + orderQty;
+    const totalCost = Math.round(costPrice * baseQty) + orderCost;
+    const totalRevenue = Math.round(sellPrice * baseQty) + orderRev;
+    const totalProfit = totalRevenue - totalCost;
+
+    sumQty += totalQty;
+    sumCost += totalCost;
+    sumRev += totalRevenue;
+    sumProfit += totalProfit;
+
+    return `<tr>
+      <td data-label="Sản phẩm">
+        <div class="person">${esc(x.name)} <span class="code">${esc(x.unit || 'Cái')}</span></div>
+        <div class="subline">${esc(x.spec || 'Tiêu chuẩn')}${parseNum(x.bulkCost) > 0 && parseNum(x.usesPerBulk) > 1 ? ` · Gốc lô: ${money(x.bulkCost)} ₫ / ${numFmt(x.usesPerBulk)} lần` : ''}</div>
+        ${orderQty > 0 ? `<div class="subline" style="color:var(--core-blue)">📦 Đã gắn vào đơn: <b>${numFmt(orderQty)} ${esc(x.unit || 'lần')}</b> (bảo toàn giá lúc phát sinh)</div>` : ''}
+      </td>
+      <td data-label="Giá nhập"><b>${money(costPrice)} ₫</b><div class="subline">/ ${esc(x.unit || 'Cái')}</div></td>
+      <td data-label="Giá bán"><b>${money(sellPrice)} ₫</b><div class="subline">/ ${esc(x.unit || 'Cái')}</div></td>
+      <td data-label="Lãi đơn vị"><b class="${unitProfit >= 0 ? 'income-color' : 'expense-color'}">${unitProfit >= 0 ? '+' : ''}${money(unitProfit)} ₫</b></td>
+      <td data-label="Số lượng">
+        <div class="qty-stepper">
+          <button type="button" class="qty-step-btn" onclick="stepPackQty('${x.id}', -1)" title="Giảm 1">−</button>
+          <b style="min-width:28px;text-align:center">${numFmt(totalQty)}</b>
+          <button type="button" class="qty-step-btn" onclick="stepPackQty('${x.id}', 1)" title="Tăng 1">＋</button>
+        </div>
+      </td>
+      <td data-label="Tổng giá vốn"><b>${money(totalCost)} ₫</b></td>
+      <td data-label="Tổng doanh thu"><b class="blue-color">${money(totalRevenue)} ₫</b></td>
+      <td data-label="Tổng lãi"><b class="${totalProfit >= 0 ? 'income-color' : 'expense-color'}">${totalProfit >= 0 ? '+' : ''}${money(totalProfit)} ₫</b></td>
+      <td data-label="Thao tác">
+        <div class="row-actions">
+          <button type="button" class="iconbtn" onclick="editRecord('packitem','${x.id}')">Sửa</button>
+          <button type="button" class="iconbtn danger-tint" onclick="deletePackItem('${x.id}')">Xóa</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  const headers = '<th>Sản phẩm</th><th>Giá nhập</th><th>Giá bán</th><th>Lãi đơn vị</th><th>Số lượng</th><th>Tổng giá vốn</th><th>Tổng doanh thu</th><th>Tổng lãi</th><th>Thao tác</th>';
+  const tfoot = rows ? `<tfoot>
+    <tr>
+      <td colspan="4">Tổng cộng danh mục này</td>
+      <td>${numFmt(sumQty)}</td>
+      <td>${money(sumCost)} ₫</td>
+      <td class="blue-color">${money(sumRev)} ₫</td>
+      <td class="${sumProfit >= 0 ? 'income-color' : 'expense-color'}">${sumProfit >= 0 ? '+' : ''}${money(sumProfit)} ₫</td>
+      <td></td>
+    </tr>
+  </tfoot>` : '';
+
+  const catNames = { wood: 'Đóng hộp gỗ', carton: 'Đóng hộp carton', shock: 'Chống sốc' };
+  const tableHtml = `<table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody>${tfoot}</table>` +
+    (rows ? '' : `<div class="empty">
+      <div class="empty-ico">🪵</div>
+      <strong>Chưa có sản phẩm trong mục ${esc(catNames[cat] || '')}</strong>
+      <p>Nhấn nút bên dưới để thêm sản phẩm đóng gói và tự động tính giá vốn, doanh thu, lợi nhuận.</p>
+      <button type="button" class="btn small primary" onclick="openNewPackItem('${cat}')">＋ Thêm sản phẩm ${esc(catNames[cat] || '')}</button>
+    </div>`);
+
+  return { totalCount: all.length, filteredCount: filtered.length, tableHtml };
+}
+
+function stepPackQty(id, delta) {
+  const item = (db.packagingCatalog || []).find(x => x.id === id);
+  if (!item) return;
+  item.qty = Math.max(0, parseNum(item.qty) + delta);
+  item.updatedAt = nowStamp();
+  persist();
+  render();
+}
+
+function settleExtraShip(id) {
+  const item = (db.extraShipments || []).find(x => x.id === id);
+  if (!item) return;
+  item.status = 'Đã thu';
+  item.paidAmount = Math.round(parseNum(item.amount));
+  item.updatedAt = nowStamp();
+  addAuditLog('Thu cước ship phát sinh', `${item.customer || item.orderCode || 'Khách hàng'}`, `Đã thu đủ ${money(item.amount)} ₫ (${item.content || ''})`);
+  persist();
+  render();
+  toast(`✓ Đã thu đủ cước ship phát sinh: ${money(item.amount)} ₫`);
+}
+
+function deleteExtraShip(id) {
+  const item = (db.extraShipments || []).find(x => x.id === id);
+  if (!item) return;
+  if (!confirm(`Xóa khoản Cước ship phát sinh "${item.content || ''}" (${money(item.amount)} ₫) của khách ${item.customer || ''}?`)) return;
+  db.extraShipments = (db.extraShipments || []).filter(x => x.id !== id);
+  addAuditLog('Xóa cước ship phát sinh', item.customer || item.orderCode || 'Cước ship', `Đã xóa ${item.content || ''} (${money(item.amount)} ₫)`);
+  persist();
+  render();
+  toast('Đã xóa khoản cước ship phát sinh');
+}
+
+function deletePackItem(id) {
+  const item = (db.packagingCatalog || []).find(x => x.id === id);
+  if (!item) return;
+  if (!confirm(`Xóa sản phẩm đóng gói "${item.name}"? (Các đơn hàng cũ đã gắn sản phẩm này vẫn giữ nguyên dữ liệu lịch sử).`)) return;
+  db.packagingCatalog = (db.packagingCatalog || []).filter(x => x.id !== id);
+  addAuditLog('Xóa vật tư đóng gói', item.name, `Đã xóa khỏi danh mục đóng gói`);
+  persist();
+  render();
+  toast(`Đã xóa "${item.name}"`);
+}
+
+function incidentalsPage() {
+  const sum = calcIncidentalsSummary();
+  const extraCount = (db.extraShipments || []).length;
+  const woodCount = (db.packagingCatalog || []).filter(x => x.category === 'wood').length;
+  const cartonCount = (db.packagingCatalog || []).filter(x => x.category === 'carton').length;
+  const shockCount = (db.packagingCatalog || []).filter(x => x.category === 'shock').length;
+  const hasFilter = Boolean(query || window.statusFilter);
+
+  const topTabs = `<div class="toolbar-row">
+    <div class="subtabs" role="tablist" aria-label="4 Tab Chi phí phát sinh & Đóng gói">
+      <button type="button" class="subtab ${incTab === 'extraship' ? 'active' : ''}" onclick="incTab='extraship';query='';window.statusFilter='';render()">🚚 1. Cước ship phát sinh <span class="chip-count">${extraCount}</span></button>
+      <button type="button" class="subtab ${incTab === 'wood' ? 'active' : ''}" onclick="incTab='wood';query='';window.statusFilter='';render()">🪵 2. Đóng hộp gỗ <span class="chip-count">${woodCount}</span></button>
+      <button type="button" class="subtab ${incTab === 'carton' ? 'active' : ''}" onclick="incTab='carton';query='';window.statusFilter='';render()">📦 3. Đóng hộp carton <span class="chip-count">${cartonCount}</span></button>
+      <button type="button" class="subtab ${incTab === 'shock' ? 'active' : ''}" onclick="incTab='shock';query='';window.statusFilter='';render()">🫧 4. Chống sốc <span class="chip-count">${shockCount}</span></button>
+    </div>
+    ${renderIncPeriodPicker()}
+  </div>`;
+
+  // Khu vực thống kê tổng hợp 9 chỉ số dành cho Admin
+  const statsSection = `<div class="inc-stats-grid">
+    <div class="inc-stat-group">
+      <div class="inc-stat-group-head">
+        <span>📊 Tổng hợp Vật tư & Đóng gói (${esc(getIncPeriodLabel())})</span>
+      </div>
+      <div class="inc-stat-rows">
+        <div class="inc-stat-row"><span>Tổng vốn nhập vật tư:</span><b>${money(sum.totalPackCost)} ₫</b></div>
+        <div class="inc-stat-row"><span>Tổng doanh thu đóng gói:</span><b class="blue-color">${money(sum.totalPackRevenue)} ₫</b></div>
+        <div class="inc-stat-row"><span>Tổng lợi nhuận đóng gói:</span><b class="${sum.totalPackProfit >= 0 ? 'income-color' : 'expense-color'}">${sum.totalPackProfit >= 0 ? '+' : ''}${money(sum.totalPackProfit)} ₫</b></div>
+      </div>
+    </div>
+
+    <div class="inc-stat-group">
+      <div class="inc-stat-group-head">
+        <span>🪵 Lợi nhuận từng Danh mục Đóng gói</span>
+      </div>
+      <div class="inc-stat-rows">
+        <div class="inc-stat-row"><span>1. Lợi nhuận từ hộp gỗ:</span><b class="income-color">+${money(sum.woodProfit)} ₫</b></div>
+        <div class="inc-stat-row"><span>2. Lợi nhuận từ carton:</span><b class="income-color">+${money(sum.cartonProfit)} ₫</b></div>
+        <div class="inc-stat-row"><span>3. Lợi nhuận từ chống sốc:</span><b class="income-color">+${money(sum.shockProfit)} ₫</b></div>
+      </div>
+    </div>
+
+    <div class="inc-stat-group">
+      <div class="inc-stat-group-head">
+        <span>🚚 Thống kê Cước ship phát sinh (Khách trả)</span>
+      </div>
+      <div class="inc-stat-rows">
+        <div class="inc-stat-row"><span>Tổng cước ship phát sinh:</span><b>${money(sum.totalExtraShip)} ₫</b></div>
+        <div class="inc-stat-row"><span>Cước ship đã thu:</span><b class="income-color">${money(sum.collectedExtraShip)} ₫</b></div>
+        <div class="inc-stat-row"><span>Cước ship chưa thu:</span><b class="${sum.uncollectedExtraShip > 0 ? 'expense-color' : ''}">${money(sum.uncollectedExtraShip)} ₫</b></div>
+      </div>
+    </div>
+  </div>`;
+
+  if (incTab === 'extraship') {
+    const data = getExtraShipViewData();
+    return `<div class="section-stack">
+      ${topTabs}
+      ${statsSection}
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">🚚 Danh sách Cước ship phát sinh</div>
+            <div class="panel-sub">Khoản phí vận chuyển phát sinh thêm mà khách hàng phải thanh toán (tự động cộng vào phải thu của đơn liên kết, không tính là lợi nhuận mặc định)</div>
+          </div>
+          <div class="row-actions">
+            <span class="result-count" id="resultCount">${data.filteredCount} / ${data.totalCount} khoản</span>
+            <button type="button" class="btn small primary" onclick="openNew('extraship')">＋ Thêm Cước ship phát sinh</button>
+          </div>
+        </div>
+        <div class="filters">
+          <div class="search">
+            <span class="search-ico" aria-hidden="true">⌕</span>
+            <input id="searchInput" class="field" placeholder="Tìm theo mã đơn hàng, tên khách hàng, nội dung phát sinh…" value="${esc(query)}" oninput="handleSearch(this)">
+            <button type="button" id="searchClearBtn" class="search-clear ${query ? '' : 'hidden'}" onclick="clearSearchInput()" title="Xóa từ khóa">×</button>
+          </div>
+          <select class="select" aria-label="Lọc trạng thái thanh toán" onchange="setFilter(this.value)">
+            <option value="">Mọi trạng thái</option>
+            ${extraShipStatuses.map(s => `<option value="${esc(s)}" ${window.statusFilter === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+          </select>
+          <button type="button" id="resetFilterBtn" class="btn subtle small ${hasFilter ? '' : 'hidden'}" onclick="clearFilters()">Đặt lại lọc</button>
+        </div>
+        <div class="table-wrap" id="tableArea">${data.tableHtml}</div>
+      </section>
+    </div>`;
+  }
+
+  const catTitles = {
+    wood: ['🪵 Danh mục 1: ĐÓNG HỘP GỖ', 'Quản lý giá nhập, giá bán, số lượng sử dụng và lợi nhuận đóng kiện gỗ'],
+    carton: ['📦 Danh mục 2: ĐÓNG HỘP CARTON', 'Quản lý giá nhập, giá bán, số lượng thùng carton các kích cỡ và lợi nhuận'],
+    shock: ['🫧 Danh mục 3: CHỐNG SỐC', 'Hỗ trợ tính giá vốn theo từng lần sử dụng (VD: 1 cuộn 105.000đ / 20 lần = 5.250đ/lần) và tự động tính lãi']
+  };
+  const data = getPackagingTabViewData(incTab);
+
+  return `<div class="section-stack">
+    ${topTabs}
+    ${statsSection}
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">${catTitles[incTab][0]}</div>
+          <div class="panel-sub">${catTitles[incTab][1]}</div>
+        </div>
+        <div class="row-actions">
+          <span class="result-count" id="resultCount">${data.filteredCount} / ${data.totalCount} sản phẩm</span>
+          <button type="button" class="btn small primary" onclick="openNewPackItem('${incTab}')">＋ Thêm sản phẩm</button>
+        </div>
+      </div>
+      <div class="filters">
+        <div class="search">
+          <span class="search-ico" aria-hidden="true">⌕</span>
+          <input id="searchInput" class="field" placeholder="Tìm tên sản phẩm, quy cách, kích thước, đơn vị tính…" value="${esc(query)}" oninput="handleSearch(this)">
+          <button type="button" id="searchClearBtn" class="search-clear ${query ? '' : 'hidden'}" onclick="clearSearchInput()" title="Xóa từ khóa">×</button>
+        </div>
       </div>
       <div class="table-wrap" id="tableArea">${data.tableHtml}</div>
     </section>
@@ -1453,8 +2522,8 @@ function getDailyBreakdown(prefix) {
     const row = ensure(d);
     const m = calcOrderMetrics(o);
     row.orders++;
-    row.collected += m.totalCollectCustomer;
-    row.shipFee += m.shipCharge;
+    row.collected += m.totalCollectCustomer; // hàng + DV (không gộp cước)
+    row.shipFee += m.shipCharge;             // cước riêng, hiển thị tách biệt
     row.serviceFee += m.serviceFee;
     row.extra += m.extraCost;
     row.profit += m.netProfit;
@@ -1516,6 +2585,7 @@ function financePage() {
   const topToolbar = `<div class="toolbar-row">
     <div class="subtabs" role="tablist" aria-label="Chế độ xem tài chính">
       <button type="button" class="subtab ${financeTab === 'cashflow' ? 'active' : ''}" onclick="financeTab='cashflow';query='';window.statusFilter='';render()">💰 Thu chi & Dòng tiền</button>
+      <button type="button" class="subtab" onclick="setView('incidentals',document.querySelector('[data-view=incidentals]'))">🪵 Chi phí phát sinh & Đóng gói (4 Tab)</button>
       <button type="button" class="subtab ${financeTab === 'debts' ? 'active' : ''}" onclick="financeTab='debts';render()">🤝 Công nợ Khách & Kho ${debtOrdersCount ? `<span class="subtab-badge">${debtOrdersCount}</span>` : ''}</button>
       <button type="button" class="subtab ${financeTab === 'report' ? 'active' : ''}" onclick="financeTab='report';render()">📊 Báo cáo & Biểu đồ AI</button>
       <button type="button" class="subtab ${financeTab === 'history' ? 'active' : ''}" onclick="financeTab='history';query='';render()">🕒 Lịch sử sửa (${(db.logs || []).length})</button>
@@ -1532,7 +2602,7 @@ function financePage() {
         <div class="cash-card">
           <span class="cash-label">1. Tổng tiền thu từ khách (${esc(getPeriodLabel())})</span>
           <strong class="cash-val income-color">+${money(s.totalCollectedFromCustomer)} ₫</strong>
-          <span class="cash-sub">Tổng phát sinh phải thu: ${money(s.totalBilledCustomer)} ₫</span>
+          <span class="cash-sub">Phát sinh phải thu (hàng+DV): ${money(s.totalBilledCustomer)} ₫ · Cước VC riêng: ${money(s.shipChargeTotal)} ₫</span>
         </div>
         <div class="cash-card">
           <span class="cash-label">2. Tổng tiền chuyển ra (${esc(getPeriodLabel())})</span>
@@ -1545,19 +2615,19 @@ function financePage() {
           <span class="cash-sub">Tổng cước gốc phát sinh kỳ này: ${money(s.shipCostTotal)} ₫</span>
         </div>
         <div class="cash-card">
-          <span class="cash-label">4. Doanh thu phí dịch vụ</span>
-          <strong class="cash-val blue-color">+${money(s.totalServiceRevenue)} ₫</strong>
-          <span class="cash-sub">Lãi cước: +${money(s.shipProfitTotal)} ₫ · Lãi tệ: +${money(s.fxProfitTotal)} ₫</span>
+          <span class="cash-label">4. Doanh thu phí dịch vụ & Lãi đóng gói</span>
+          <strong class="cash-val blue-color">+${money(s.totalServiceRevenue + (s.packProfitTotal || 0))} ₫</strong>
+          <span class="cash-sub">Phí DV: +${money(s.totalServiceRevenue)} ₫ · Lãi ĐG: +${money(s.packProfitTotal || 0)} ₫ · Lãi cước: +${money(s.shipProfitTotal)} ₫</span>
         </div>
-        <div class="cash-card">
-          <span class="cash-label">5. Chi phí phát sinh</span>
+        <div class="cash-card" style="cursor:pointer" onclick="setView('incidentals',document.querySelector('[data-view=incidentals]'))" title="Bấm để mở 4 tab Quản lý Chi phí phát sinh & Đóng gói">
+          <span class="cash-label">5. Chi phí phát sinh (Bấm quản lý 4 tab →)</span>
           <strong class="cash-val expense-color">−${money(s.totalIncidentalExpense)} ₫</strong>
-          <span class="cash-sub">Gồm phụ phí trên đơn & chi phí ngoài sổ</span>
+          <span class="cash-sub" style="color:var(--core-blue);font-weight:600">Mở Cước ship phát sinh · Hộp gỗ · Carton · Chống sốc →</span>
         </div>
         <div class="cash-card profit-highlight">
           <span class="cash-label">6. LỢI NHUẬN THỰC TẾ (${esc(getPeriodLabel())})</span>
           <strong class="cash-val ${s.netProfit >= 0 ? 'income-color' : 'expense-color'}">${s.netProfit >= 0 ? '+' : ''}${money(s.netProfit)} ₫</strong>
-          <span class="cash-sub">= Lãi cước + Phí DV + Lãi tệ${s.txOtherIn > 0 ? ' + Thu khác' : ''} − Chi phí phát sinh</span>
+          <span class="cash-sub">= Lãi cước + Phí DV + Lãi ĐG + Lãi tệ${s.txOtherIn > 0 ? ' + Thu khác' : ''} − Chi phí phát sinh</span>
         </div>
       </div>
 
@@ -1641,8 +2711,8 @@ function financePage() {
         <section class="panel">
           <div class="panel-head">
             <div>
-              <div class="panel-title">📤 Công nợ Kho & Đối tác (Phải trả)</div>
-              <div class="panel-sub">Nợ cước kho: <b class="amber-color">${money(s.allWarehouseUnpaid)} ₫</b> · Nợ vốn hàng: <b>${money(s.allPartnerUnpaid)} ₫</b></div>
+              <div class="panel-title">📤 Quản lý Đã Trả Cước Kho (Phải trả)</div>
+              <div class="panel-sub">Tổng cước kho chưa thanh toán: <b class="amber-color">${money(s.allWarehouseUnpaid)} ₫</b></div>
             </div>
           </div>
           ${partnerDebts.length ? partnerDebts.map(o => {
@@ -1652,16 +2722,14 @@ function financePage() {
                 <div class="todo-title">${esc(o.product || o.goodsType)} <span class="code">Khách: ${esc(o.customer)}</span></div>
                 <div class="todo-meta">
                   ${m.warehouseDebt > 0 ? `Cước kho chưa trả: <b class="amber-color">${money(m.warehouseDebt)} ₫</b> ` : ''}
-                  ${m.partnerDebt > 0 ? `· Vốn hàng chưa chuyển: <b>${money(m.partnerDebt)} ₫</b>` : ''}
                 </div>
               </div>
               <div class="todo-right">
-                ${m.warehouseDebt > 0 ? `<button type="button" class="iconbtn primary-tint" onclick="settleOrderDebt('${o.id}','warehouse')">Trả kho</button>` : ''}
-                ${m.partnerDebt > 0 ? `<button type="button" class="iconbtn" onclick="settleOrderDebt('${o.id}','partner')">Đã chuyển tệ</button>` : ''}
+                ${m.warehouseDebt > 0 ? `<button type="button" class="iconbtn primary-tint" onclick="settleOrderDebt('${o.id}','warehouse')">Đã trả cước kho</button>` : ''}
                 <button type="button" class="iconbtn" onclick="editRecord('order','${o.id}')">Sửa</button>
               </div>
             </div>`;
-          }).join('') : '<div class="empty"><p>✓ Đã thanh toán hết tiền cước kho và đối tác.</p></div>'}
+          }).join('') : '<div class="empty"><p>✓ Đã thanh toán hết tiền cước kho.</p></div>'}
         </section>
       </div>
     </div>`;
@@ -1848,7 +2916,7 @@ function tableShell(title, sub, placeholder, statuses, tableHtml, totalCount, fi
 function getShipmentsViewData() {
   const q = query.toLowerCase();
   const filtered = (db.shipments || []).filter(o => {
-    const matchQ = `${o.customer} ${o.code} ${o.waybill} ${o.product} ${o.phone} ${o.note || ''}`.toLowerCase().includes(q);
+    const matchQ = `${o.customer} ${o.code} ${o.waybill} ${o.product} ${o.packagingType || ''} ${o.phone} ${o.note || ''}`.toLowerCase().includes(q);
     const matchStatus = !window.statusFilter ? true : window.statusFilter === '__active' ? o.status !== 'Đã giao khách' : o.status === window.statusFilter;
     return matchQ && matchStatus;
   });
@@ -1859,6 +2927,7 @@ function getShipmentsViewData() {
       (o.sourcePurchaseId && x.sourcePurchaseId === o.sourcePurchaseId) ||
       (o.waybill && x.waybill === o.waybill)
     );
+    const hasPack = (o.packagingType && o.packagingType !== 'Tiêu chuẩn (Miễn phí)') || parseNum(o.packCharge) > 0;
     return `<tr>
     <td data-label="Khách hàng">
       <div class="customer">
@@ -1873,7 +2942,7 @@ function getShipmentsViewData() {
       <a class="link" target="_blank" rel="noopener" href="https://www.17track.net/en#nums=${encodeURIComponent(o.waybill)}" title="Tra cứu trên 17Track">${esc(o.waybill)} ↗</a>
     </td>
     <td data-label="Sản phẩm">
-      <div class="person">${esc(o.product)}</div>
+      <div class="person">${esc(o.product)} ${hasPack ? `<span class="pack-pill">🪵 ${esc(o.packagingType || 'Đóng gói')}${parseNum(o.packCharge) > 0 ? ` (+${money(o.packCharge)} ₫)` : ''}</span>` : ''}</div>
       <div class="subline">${esc(o.platform)} · SL: ${esc(o.qty)}${o.value ? ` · ¥${numFmt(o.value)}` : ''}</div>
       ${o.note ? `<div class="note-box">${esc(o.note)}</div>` : ''}
       ${o.updatedAt ? `<span class="ts-stamp">🕒 ${esc(o.updatedAt)}</span>` : ''}
@@ -2071,8 +3140,11 @@ function customersPage() {
 function markFormDirty() {
   formDirty = true;
   hideFormError();
-  if (document.getElementById('recordForm')?.dataset.kind === 'order') {
+  const kind = document.getElementById('recordForm')?.dataset.kind;
+  if (kind === 'order') {
     updateOrderCalcPreview();
+  } else if (kind === 'packitem') {
+    updatePackItemCalcPreview();
   }
 }
 
@@ -2139,17 +3211,23 @@ function openForCustomer(kind, key) {
   }
 }
 
-function openNew(kind = view === 'purchases' ? 'purchase' : view === 'finance' ? 'finance' : view === 'shipments' ? 'shipment' : 'order') {
+function openNewPackItem(cat = 'wood') {
+  openNew('packitem', { category: cat, unit: cat === 'shock' ? 'Lần sử dụng' : cat === 'carton' ? 'Thùng' : 'Cái', qty: 1 });
+}
+
+function openNew(kind = view === 'purchases' ? 'purchase' : view === 'finance' ? 'finance' : view === 'shipments' ? 'shipment' : view === 'incidentals' ? (incTab === 'extraship' ? 'extraship' : 'packitem') : 'order', preset = {}) {
   const form = document.getElementById('recordForm');
   form.reset();
   form.dataset.kind = kind;
   form.dataset.id = '';
   formDirty = false;
   hideFormError();
-  document.getElementById('modalBox')?.classList.toggle('wide', kind === 'order');
+  document.getElementById('modalBox')?.classList.toggle('wide', kind === 'order' || kind === 'packitem');
 
   document.getElementById('modalTitle').textContent =
     kind === 'order' ? 'Tạo Note đơn & Tính lãi tự động' :
+    kind === 'extraship' ? 'Thêm Cước ship phát sinh (Khách thanh toán)' :
+    kind === 'packitem' ? 'Thêm sản phẩm / dịch vụ đóng gói' :
     kind === 'purchase' ? 'Thêm yêu cầu mua hộ' :
     kind === 'finance' ? 'Ghi khoản thu / chi' :
     'Thêm đơn ký gửi';
@@ -2158,8 +3236,9 @@ function openNew(kind = view === 'purchases' ? 'purchase' : view === 'finance' ?
   document.getElementById('recordHistoryZone').classList.add('hidden');
   cancelDeleteModal();
 
-  renderFields(kind, {});
+  renderFields(kind, preset);
   if (kind === 'order') updateOrderCalcPreview();
+  else if (kind === 'packitem') updatePackItemCalcPreview();
   else document.getElementById('calcPreviewZone').innerHTML = '';
 
   document.getElementById('modal').classList.add('open');
@@ -2214,6 +3293,9 @@ function makeOrderFromShipment(id) {
     product: `${s.product}${s.waybill ? ` · VĐ ${s.waybill}` : ''}`,
     goodsCny: s.value || 0,
     includeGoodsInFlow: false,
+    packagingType: s.packagingType || packagingTypes[0],
+    packCost: s.packCost || 0,
+    packCharge: s.packCharge || 0,
     status: s.status === 'Đã về kho Việt Nam' ? 'Đã về kho VN' : s.status === 'Đã giao khách' ? 'Đã giao khách' : 'Đang vận chuyển',
     note: s.note || ''
   });
@@ -2242,7 +3324,13 @@ function makeShipmentFromPurchase(id) {
 }
 
 function editRecord(kind, id) {
-  const list = kind === 'order' ? db.orderNotes : kind === 'shipment' ? db.shipments : kind === 'purchase' ? db.purchases : db.transactions;
+  const list =
+    kind === 'order' ? db.orderNotes :
+    kind === 'shipment' ? db.shipments :
+    kind === 'purchase' ? db.purchases :
+    kind === 'extraship' ? db.extraShipments :
+    kind === 'packitem' ? db.packagingCatalog :
+    db.transactions;
   const o = (list || []).find(x => x.id === id);
   if (!o) return;
 
@@ -2251,19 +3339,22 @@ function editRecord(kind, id) {
   form.dataset.id = id;
   formDirty = false;
   hideFormError();
-  document.getElementById('modalBox')?.classList.toggle('wide', kind === 'order');
+  document.getElementById('modalBox')?.classList.toggle('wide', kind === 'order' || kind === 'packitem');
 
   document.getElementById('modalTitle').textContent =
-    kind === 'order' ? 'Cập nhật Note đơn & Bảng tính' :
+    kind === 'order' ? 'Cập nhật Note đơn · Đóng gói & Bảng tính' :
+    kind === 'extraship' ? 'Cập nhật Cước ship phát sinh' :
+    kind === 'packitem' ? 'Cập nhật sản phẩm / dịch vụ đóng gói' :
     kind === 'purchase' ? 'Cập nhật yêu cầu mua hộ' :
     kind === 'finance' ? 'Cập nhật khoản thu / chi' :
-    'Cập nhật đơn ký gửi';
+    'Cập nhật đơn ký gửi kho';
   document.getElementById('modalSub').textContent = o.updatedAt ? `Lần sửa gần nhất: ${o.updatedAt}` : 'Chỉnh sửa thông tin rồi bấm Lưu.';
   document.getElementById('deleteZone').classList.remove('hidden');
   cancelDeleteModal();
 
   renderFields(kind, o);
   if (kind === 'order') updateOrderCalcPreview();
+  else if (kind === 'packitem') updatePackItemCalcPreview();
   else document.getElementById('calcPreviewZone').innerHTML = '';
 
   renderRecordHistory(o);
@@ -2316,8 +3407,6 @@ function selectLineType(lineVal) {
     btn.classList.toggle('active', btn.dataset.line === lineVal);
   });
   const isTth = ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(lineVal);
-  const chk = document.getElementById('f_includeGoodsInFlow');
-  if (chk) chk.checked = isTth;
   toggleCnyBox(isTth || parseNum(val('goodsCny')) > 0);
   formDirty = true;
   updateOrderCalcPreview();
@@ -2352,15 +3441,116 @@ function fillFullCustomerPay() {
   const m = calcOrderMetrics(draft);
   const inp = document.getElementById('f_customerPaid');
   if (inp) {
-    inp.value = String(m.totalCollectCustomer);
+    inp.value = String(Math.max(0, m.totalCollectCustomer - m.extraShipPaid));
     formDirty = true;
     updateOrderCalcPreview();
   }
 }
 
+// ============================================================================
+// GẮN VẬT TƯ ĐÓNG GÓI VÀO ĐƠN HÀNG (BẢO TOÀN LỊCH SỬ GIÁ NHẬP & GIÁ BÁN)
+// ============================================================================
+function renderDraftOrderPackList() {
+  const listEl = document.getElementById('orderPackListZone');
+  if (!listEl) return;
+  if (!draftOrderPackItems.length) {
+    listEl.innerHTML = `<div style="font-size:12px;color:var(--muted)">Chưa gắn vật tư đóng gói chi tiết (hoặc bạn có thể nhập nhanh ở ô Chi phí / Phí đóng gói bên dưới).</div>`;
+    return;
+  }
+  const sumCost = draftOrderPackItems.reduce((s, it) => s + Math.round(parseNum(it.costPrice) * parseNum(it.qty)), 0);
+  const sumSell = draftOrderPackItems.reduce((s, it) => s + Math.round(parseNum(it.sellPrice) * parseNum(it.qty)), 0);
+  const sumProf = sumSell - sumCost;
+
+  listEl.innerHTML = `
+    <div class="order-pack-list">
+      ${draftOrderPackItems.map((it, idx) => {
+        const c = Math.round(parseNum(it.costPrice) * parseNum(it.qty));
+        const s = Math.round(parseNum(it.sellPrice) * parseNum(it.qty));
+        const p = s - c;
+        return `<div class="order-pack-item">
+          <div>
+            <b>${numFmt(it.qty)} ${esc(it.unit || 'lần')} · ${esc(it.name)}</b>
+            <span class="subline" style="margin-left:6px">(Vốn: ${money(it.costPrice)} ₫ → Bán: ${money(it.sellPrice)} ₫)</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span>Vốn: <b>${money(c)} ₫</b> · Thu: <b class="blue-color">${money(s)} ₫</b> · Lãi: <b class="income-color">+${money(p)} ₫</b></span>
+            <button type="button" class="iconbtn danger-tint" onclick="removeDraftOrderPackItem(${idx})" title="Gỡ vật tư này">×</button>
+          </div>
+        </div>`;
+      }).join('')}
+      <div style="display:flex;justify-content:space-between;padding:6px 4px 0;font-size:12.5px;border-top:1px dashed var(--line)">
+        <span>Tổng cộng vật tư đóng gói của đơn này (đã chốt cứng giá):</span>
+        <span>Tổng vốn: <b>${money(sumCost)} ₫</b> · Tổng thu khách: <b class="blue-color">${money(sumSell)} ₫</b> · Tổng lãi ĐG: <b class="income-color">+${money(sumProf)} ₫</b></span>
+      </div>
+    </div>
+  `;
+}
+
+function addDraftOrderPackItem() {
+  const catId = document.getElementById('f_pickPackCatalogId')?.value;
+  const qty = Math.max(0.5, parseNum(document.getElementById('f_pickPackQty')?.value || 1));
+  const found = (db.packagingCatalog || []).find(x => x.id === catId);
+  if (!found) return;
+
+  // Chụp (snapshot) giá nhập và giá bán tại thời điểm gắn vào đơn
+  draftOrderPackItems.push({
+    id: makeId(),
+    catalogId: found.id,
+    category: found.category,
+    name: found.name,
+    spec: found.spec || '',
+    unit: found.unit || 'Cái',
+    costPrice: Math.round(parseNum(found.costPrice)),
+    sellPrice: Math.round(parseNum(found.sellPrice)),
+    qty
+  });
+
+  // Đồng bộ tự động sang ô packCost / packCharge để hiển thị trực quan
+  syncPackInputsFromDraftItems();
+  formDirty = true;
+  renderDraftOrderPackList();
+  updateOrderCalcPreview();
+}
+
+function removeDraftOrderPackItem(idx) {
+  draftOrderPackItems.splice(idx, 1);
+  syncPackInputsFromDraftItems();
+  formDirty = true;
+  renderDraftOrderPackList();
+  updateOrderCalcPreview();
+}
+
+function syncPackInputsFromDraftItems() {
+  const costInp = document.getElementById('f_packCost');
+  const chargeInp = document.getElementById('f_packCharge');
+  const typeSel = document.getElementById('f_packagingType');
+  if (draftOrderPackItems.length > 0) {
+    const sumCost = draftOrderPackItems.reduce((s, it) => s + Math.round(parseNum(it.costPrice) * parseNum(it.qty)), 0);
+    const sumSell = draftOrderPackItems.reduce((s, it) => s + Math.round(parseNum(it.sellPrice) * parseNum(it.qty)), 0);
+    if (costInp) costInp.value = String(sumCost);
+    if (chargeInp) chargeInp.value = String(sumSell);
+    if (typeSel && typeSel.value === packagingTypes[0]) {
+      const firstCat = draftOrderPackItems[0].category;
+      typeSel.value = firstCat === 'wood' ? 'Đóng hộp gỗ' : firstCat === 'carton' ? 'Đóng hộp carton' : 'Chống sốc';
+    }
+  } else {
+    if (costInp) costInp.value = '';
+    if (chargeInp) chargeInp.value = '';
+  }
+}
+
 function readDraftOrderFromForm() {
+  const id = document.getElementById('recordForm')?.dataset.id || '';
+  const prev = (db.orderNotes || []).find(x => x.id === id);
+  const lineType = val('lineType') || 'Xách tay';
+  // Bảo toàn dữ liệu lịch sử nếu đơn cũ đã có includeGoodsInFlow / partnerPaid
+  const includeGoods = prev && prev.includeGoodsInFlow !== undefined
+    ? Boolean(prev.includeGoodsInFlow)
+    : ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(lineType);
+
   return {
-    lineType: val('lineType') || 'Xách tay',
+    id,
+    lineType,
     packages: Math.max(1, Math.round(parseNum(val('packages')) || 1)),
     customer: val('customer'),
     phone: val('phone'),
@@ -2372,9 +3562,13 @@ function readDraftOrderFromForm() {
     product: val('product'),
     goodsCny: parseNum(val('goodsCny')),
     goodsVndInput: parseNum(val('goodsVndInput')),
-    includeGoodsInFlow: Boolean(document.getElementById('f_includeGoodsInFlow')?.checked),
+    includeGoodsInFlow: includeGoods,
     shipCost: parseNum(val('shipCost')),
     shipCharge: parseNum(val('shipCharge')),
+    packagingType: val('packagingType') || packagingTypes[0],
+    packCost: parseNum(val('packCost')),
+    packCharge: parseNum(val('packCharge')),
+    packagingItems: [...draftOrderPackItems],
     serviceFeePct: parseNum(val('serviceFeePct')),
     serviceFeeManual: parseNum(val('serviceFeeManual')),
     rateBuy: parseNum(val('rateBuy')),
@@ -2382,7 +3576,7 @@ function readDraftOrderFromForm() {
     extraCost: parseNum(val('extraCost')),
     customerPaid: parseNum(val('customerPaid')),
     warehousePaid: Boolean(document.getElementById('f_warehousePaid')?.checked),
-    partnerPaid: Boolean(document.getElementById('f_partnerPaid')?.checked),
+    partnerPaid: prev && prev.partnerPaid !== undefined ? Boolean(prev.partnerPaid) : true,
     status: val('status') || orderStages[0],
     date: val('date') || dateKey()
   };
@@ -2401,22 +3595,24 @@ function updateOrderCalcPreview() {
       : 'Nhập trực tiếp VND nếu đơn không tính theo tệ';
   }
 
-  const posTotal = Math.max(1, Math.max(0, m.shipProfit) + Math.max(0, m.serviceFee) + Math.max(0, m.fxProfit));
+  const posTotal = Math.max(1, Math.max(0, m.shipProfit) + Math.max(0, m.serviceFee) + Math.max(0, m.packProfit) + Math.max(0, m.fxProfit));
   const wShip = Math.round((Math.max(0, m.shipProfit) / posTotal) * 100);
   const wFee = Math.round((Math.max(0, m.serviceFee) / posTotal) * 100);
-  const wFx = Math.max(0, 100 - wShip - wFee);
+  const wPack = Math.round((Math.max(0, m.packProfit) / posTotal) * 100);
+  const wFx = Math.max(0, 100 - wShip - wFee - wPack);
 
   zone.innerHTML = `<div class="ai-calc-box ${m.netProfit < 0 ? 'loss' : ''}">
     <div class="ai-calc-top">
       <div>
         <strong style="font-size:13.5px">🤖 Lợi nhuận thực tế đơn này: <span class="${m.netProfit >= 0 ? 'income-color' : 'expense-color'}" style="font-size:17px">${m.netProfit >= 0 ? '+' : ''}${money(m.netProfit)} ₫</span></strong>
       </div>
-      <span style="font-size:12px;color:var(--muted)">Phải thu khách: <b>${money(m.totalCollectCustomer)} ₫</b> · ${m.customerDebt > 0 ? `<b class="expense-color">Còn nợ ${money(m.customerDebt)} ₫</b>` : m.totalCollectCustomer > 0 ? '<b class="income-color">✓ Đã thu đủ</b>' : '<span>Chưa phát sinh phải thu</span>'}</span>
+      <span style="font-size:12px;color:var(--muted)">Phải thu khách: <b>${money(m.totalCollectCustomer)} ₫</b>${m.extraShipTotal > 0 ? ` (gồm Cước ship phát sinh +${money(m.extraShipTotal)} ₫)` : ''} · ${m.customerDebt > 0 ? `<b class="expense-color">Còn nợ ${money(m.customerDebt)} ₫</b>` : m.totalCollectCustomer > 0 ? '<b class="income-color">✓ Đã thu đủ</b>' : '<span>Chưa phát sinh phải thu</span>'}</span>
     </div>
     <div class="pipeline-track" style="height:8px">
-      <div style="width:${wShip}%;background:#3b82f6"></div>
-      <div style="width:${wFee}%;background:#10b981"></div>
-      <div style="width:${wFx}%;background:#f59e0b"></div>
+      <div style="width:${wShip}%;background:#20a8d8"></div>
+      <div style="width:${wFee}%;background:#4dbd74"></div>
+      <div style="width:${wPack}%;background:#f86c6b"></div>
+      <div style="width:${wFx}%;background:#f8cb00"></div>
     </div>
     <div class="ai-calc-metrics">
       <div class="ai-mini">
@@ -2432,6 +3628,10 @@ function updateOrderCalcPreview() {
         <b class="income-color">+${money(m.serviceFee)} ₫</b>
       </div>
       <div class="ai-mini">
+        <span>🪵 Lãi đóng gói</span>
+        <b class="${m.packProfit >= 0 ? 'income-color' : 'expense-color'}">${m.packProfit >= 0 ? '+' : ''}${money(m.packProfit)} ₫</b>
+      </div>
+      <div class="ai-mini">
         <span>🟡 Lãi tỷ giá tệ</span>
         <b class="amber-color">${m.fxProfit >= 0 ? '+' : ''}${money(m.fxProfit)} ₫</b>
       </div>
@@ -2439,12 +3639,70 @@ function updateOrderCalcPreview() {
   </div>`;
 }
 
+// Tự động tính giá vốn mỗi lần sử dụng (VD: 1 cuộn chống sốc 105.000đ / 20 lần = 5.250đ) và preview lãi đóng gói
+function recalcBulkUnitCost() {
+  const bulk = parseNum(val('bulkCost'));
+  const uses = parseNum(val('usesPerBulk'));
+  if (bulk > 0 && uses > 0) {
+    const unitCost = Math.round(bulk / uses);
+    const costInp = document.getElementById('f_costPrice');
+    if (costInp) costInp.value = String(unitCost);
+  }
+  updatePackItemCalcPreview();
+}
+
+function updatePackItemCalcPreview() {
+  const zone = document.getElementById('calcPreviewZone');
+  if (!zone) return;
+  const costPrice = Math.round(parseNum(val('costPrice')));
+  const sellPrice = Math.round(parseNum(val('sellPrice')));
+  const qty = Math.max(0, parseNum(val('qty')));
+  const unitProfit = sellPrice - costPrice;
+  const totalCost = Math.round(costPrice * qty);
+  const totalRevenue = Math.round(sellPrice * qty);
+  const totalProfit = totalRevenue - totalCost;
+
+  zone.innerHTML = `<div class="ai-calc-box ${totalProfit < 0 ? 'loss' : ''}">
+    <div class="ai-calc-top">
+      <strong style="font-size:13.5px">🪵 Tự động tính Lợi nhuận Đóng gói: <span class="${totalProfit >= 0 ? 'income-color' : 'expense-color'}" style="font-size:17px">${totalProfit >= 0 ? '+' : ''}${money(totalProfit)} ₫</span></strong>
+      <span style="font-size:12px;color:var(--muted)">Công thức: Lãi đơn vị = Giá bán − Giá nhập · Tổng lãi = Tổng doanh thu − Tổng giá vốn</span>
+    </div>
+    <div class="ai-calc-metrics" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+      <div class="ai-mini">
+        <span>Lãi đơn vị</span>
+        <b class="${unitProfit >= 0 ? 'income-color' : 'expense-color'}">${unitProfit >= 0 ? '+' : ''}${money(unitProfit)} ₫</b>
+      </div>
+      <div class="ai-mini">
+        <span>Tổng giá vốn (${numFmt(qty)})</span>
+        <b>${money(totalCost)} ₫</b>
+      </div>
+      <div class="ai-mini">
+        <span>Tổng doanh thu (${numFmt(qty)})</span>
+        <b class="blue-color">${money(totalRevenue)} ₫</b>
+      </div>
+      <div class="ai-mini">
+        <span>Tổng lợi nhuận</span>
+        <b class="${totalProfit >= 0 ? 'income-color' : 'expense-color'}">${totalProfit >= 0 ? '+' : ''}${money(totalProfit)} ₫</b>
+      </div>
+    </div>
+  </div>`;
+}
+
+function onSelectExtraShipOrder(orderId) {
+  const ord = (db.orderNotes || []).find(x => x.id === orderId);
+  if (!ord) return;
+  const codeInp = document.getElementById('f_orderCode');
+  const custInp = document.getElementById('f_customer');
+  if (codeInp) codeInp.value = ord.code || ord.id;
+  if (custInp) custInp.value = ord.customer || '';
+}
+
 function renderFields(kind, o) {
   if (kind === 'order') {
     const line = o.lineType || 'Xách tay';
     const pkg = o.packages ?? 1;
-    const includeGoods = o.includeGoodsInFlow !== undefined ? o.includeGoodsInFlow : ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(line);
     showCnyBox = Boolean(parseNum(o.goodsCny) > 0 || ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(line));
+    draftOrderPackItems = Array.isArray(o.packagingItems) ? o.packagingItems.map(x => ({ ...x })) : [];
 
     const lineChoices = [
       { val: 'Xách tay', label: '✈️ Xách tay' },
@@ -2452,6 +3710,11 @@ function renderFields(kind, o) {
       { val: 'Ký gửi kho', label: '📦 Ký gửi kho' },
       { val: 'Mua hộ trọn gói', label: '🛍 Mua hộ trọn gói' }
     ];
+
+    const catalogOpts = (db.packagingCatalog || []).map(item => {
+      const catLabel = item.category === 'wood' ? '🪵 Hộp gỗ' : item.category === 'carton' ? '📦 Carton' : '🫧 Chống sốc';
+      return `<option value="${esc(item.id)}">${catLabel}: ${esc(item.name)} (Vốn ${money(item.costPrice)}đ → Bán ${money(item.sellPrice)}đ / ${esc(item.unit || 'Cái')})</option>`;
+    }).join('');
 
     document.getElementById('formFields').innerHTML = `
       <input type="hidden" id="f_lineType" value="${esc(line)}">
@@ -2476,7 +3739,7 @@ function renderFields(kind, o) {
           </div>
         </div>
         ${selectField('goodsType', 'Loại hàng hoá', goodsTypes, o.goodsType || goodsTypes[0])}
-        ${field('product', 'Tên mặt hàng / SĐT phụ', o.product || '', 'text', false, false, 'Ví dụ: Áo khoác, Máy mài…')}
+        ${field('product', 'Tên mặt hàng / Mã vận đơn phụ', o.product || '', 'text', false, false, 'Ví dụ: Áo khoác, Máy mài…')}
         ${field('phone', 'Số điện thoại khách', o.phone || '', 'tel', false, false, '09xx xxx xxx')}
         ${field('date', 'Ngày đơn hàng', o.date || dateKey(), 'date', true)}
       </div>
@@ -2506,10 +3769,35 @@ function renderFields(kind, o) {
 
       <div class="form-card">
         <div class="form-card-title">
-          <span>3. Cước vận chuyển, Thanh toán & Ghi chú</span>
+          <span>3. Cước vận chuyển, Vật tư Đóng gói & Thanh toán</span>
         </div>
         ${field('shipCost', 'Cước vận chuyển gốc trả kho (₫)', o.shipCost ?? '', 'money', false, false, 'VD: 120000')}
-        ${field('shipCharge', 'Cước vận chuyển thu khách (₫)', o.shipCharge ?? '', 'money', false, false, 'VD: 180000')}
+        ${field('shipCharge', 'Cước vận chuyển thu khách (₫) — tính riêng', o.shipCharge ?? '', 'money', false, false, 'VD: 180000 (tách riêng, không gộp vào nợ khách)')}
+
+        <div class="order-pack-zone">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+            <strong style="font-size:12.5px">🪵 Ghi nhận vật tư đóng gói trực tiếp vào đơn hàng (Tự lưu cứng giá nhập & giá bán lúc phát sinh)</strong>
+          </div>
+          <div class="order-pack-picker">
+            <div>
+              <label for="f_pickPackCatalogId">Chọn vật tư đóng gói (Hộp gỗ / Carton / Chống sốc)</label>
+              <select id="f_pickPackCatalogId" class="select">${catalogOpts}</select>
+            </div>
+            <div>
+              <label for="f_pickPackQty">Số lượng</label>
+              <input id="f_pickPackQty" class="field" type="text" inputmode="decimal" value="1">
+            </div>
+            <button type="button" class="btn primary" onclick="addDraftOrderPackItem()">＋ Gắn vào đơn</button>
+          </div>
+          <div id="orderPackListZone"></div>
+        </div>
+
+        <div class="pack-box">
+          ${selectField('packagingType', 'Nhãn đóng gói chính', packagingTypes, o.packagingType || packagingTypes[0], false, 'updateOrderCalcPreview()')}
+          ${field('packCost', 'Tổng giá vốn đóng gói (₫)', o.packCost ?? '', 'money', false, false, 'Tự tính khi gắn vật tư')}
+          ${field('packCharge', 'Tổng tiền đóng gói thu khách (₫)', o.packCharge ?? '', 'money', false, false, 'Tự tính khi gắn vật tư')}
+        </div>
+
         <div>
           <label for="f_customerPaid">Tiền khách đã thanh toán (₫)</label>
           <div class="input-with-btn">
@@ -2517,20 +3805,12 @@ function renderFields(kind, o) {
             <button type="button" class="btn small primary" onclick="fillFullCustomerPay()">Thu đủ</button>
           </div>
         </div>
-        ${field('extraCost', 'Chi phí phát sinh thêm (₫)', o.extraCost || '', 'money', false, false, 'Đóng gỗ, ship phụ…')}
+        ${field('extraCost', 'Chi phí phát sinh nội bộ (₫)', o.extraCost || '', 'money', false, false, 'Phụ phí nội bộ nếu có…')}
 
         <div class="check-pills">
           <label class="check-pill">
-            <input type="checkbox" id="f_includeGoodsInFlow" ${includeGoods ? 'checked' : ''} onchange="updateOrderCalcPreview()">
-            <span>Thu & trả hộ cả tiền hàng</span>
-          </label>
-          <label class="check-pill">
             <input type="checkbox" id="f_warehousePaid" ${o.warehousePaid ? 'checked' : ''} onchange="updateOrderCalcPreview()">
-            <span>Đã trả cước kho</span>
-          </label>
-          <label class="check-pill">
-            <input type="checkbox" id="f_partnerPaid" ${o.partnerPaid !== false ? 'checked' : ''} onchange="updateOrderCalcPreview()">
-            <span>Đã chuyển vốn hàng</span>
+            <span>✓ Đã trả cước kho</span>
           </label>
         </div>
 
@@ -2541,11 +3821,71 @@ function renderFields(kind, o) {
         </div>
       </div>
     `;
+    renderDraftOrderPackList();
+    return;
+  }
+
+  if (kind === 'extraship') {
+    const orderChoices = (db.orderNotes || []).filter(x => x.status !== 'Đã hủy');
+    document.getElementById('formFields').innerHTML = `
+      <div class="full">
+        <label for="f_orderId">Liên kết với đơn hàng hiện có (Tùy chọn — tự điền Mã đơn & Tên khách)</label>
+        <select id="f_orderId" class="select" onchange="onSelectExtraShipOrder(this.value)">
+          <option value="">-- Chọn đơn hàng để liên kết hoặc nhập trực tiếp bên dưới --</option>
+          ${orderChoices.map(ord => `<option value="${esc(ord.id)}" ${o.orderId === ord.id ? 'selected' : ''}>${esc(ord.code || ord.id)} · ${esc(ord.customer)} (${esc(ord.product || ord.goodsType)})</option>`).join('')}
+        </select>
+      </div>
+      ${field('orderCode', 'Mã đơn hàng', o.orderCode || '', 'text', true, false, 'Ví dụ: DC001, DR0006')}
+      ${field('customer', 'Tên khách hàng', o.customer || '', 'text', true, false, 'Ví dụ: Nguyễn Văn A', 'list="customerSuggestions"')}
+      ${field('content', 'Nội dung phát sinh', o.content || '', 'text', true, true, 'Ví dụ: Cước ship giao ngoại tỉnh, phụ phí kiện quá khổ…')}
+      ${field('amount', 'Số tiền cước ship phát sinh (₫)', o.amount ?? '', 'money', true, false, 'Ví dụ: 50000')}
+      ${field('date', 'Ngày phát sinh', o.date || dateKey(), 'date', true)}
+      ${selectField('status', 'Trạng thái thanh toán', extraShipStatuses, o.status || 'Chưa thu', false)}
+      ${field('paidAmount', 'Số tiền đã thu (₫) (nếu Thu một phần)', o.paidAmount ?? '', 'money', false, false, 'Tự động thu đủ nếu chọn Đã thu')}
+      <div class="full" style="font-size:12px;color:var(--muted);background:var(--paper-subtle);padding:8px 11px;border-radius:6px;border:1px solid var(--line-soft)">
+        ℹ️ <b>Lưu ý:</b> Đây là khoản tiền khách hàng phải thanh toán thêm (được cộng vào số tiền khách cần trả của đơn hàng liên kết), <b>không phải lợi nhuận mặc định của hệ thống</b>.
+      </div>
+    `;
+    return;
+  }
+
+  if (kind === 'packitem') {
+    const cat = o.category || (incTab !== 'extraship' ? incTab : 'wood');
+    const catChoices = [
+      { val: 'wood', label: '🪵 1. Đóng hộp gỗ' },
+      { val: 'carton', label: '📦 2. Đóng hộp carton' },
+      { val: 'shock', label: '🫧 3. Chống sốc' }
+    ];
+    document.getElementById('formFields').innerHTML = `
+      <div class="full">
+        <label for="f_category">Danh mục chi phí đóng gói *</label>
+        <select id="f_category" class="select">
+          ${catChoices.map(c => `<option value="${c.val}" ${cat === c.val ? 'selected' : ''}>${c.label}</option>`).join('')}
+        </select>
+      </div>
+      ${field('name', 'Tên sản phẩm / Dịch vụ đóng gói', o.name || '', 'text', true, false, 'VD: Hộp gỗ, Carton size M, Chống sốc…')}
+      ${field('spec', 'Quy cách hoặc kích thước', o.spec || '', 'text', false, false, 'VD: 40x30x30cm, Cuộn 20 lần dùng…')}
+      ${selectField('unit', 'Đơn vị tính', packUnits, o.unit || (cat === 'shock' ? 'Lần sử dụng' : 'Cái'))}
+      ${field('qty', 'Số lượng sử dụng', o.qty ?? 1, 'decimal', true, false, 'VD: 1')}
+
+      <div class="bulk-calc-box">
+        <div style="grid-column:1/-1;font-size:12px;font-weight:700;color:#0284c7">
+          🧮 Công cụ chia giá vốn theo lần sử dụng (Đặc biệt tiện cho Chống sốc: VD 1 cuộn 105.000đ dùng 20 lần = 5.250đ/lần)
+        </div>
+        ${field('bulkCost', 'Giá mua nguyên cuộn / lô (₫) (nếu có)', o.bulkCost || '', 'money', false, false, 'VD: 105000', 'oninput="recalcBulkUnitCost()"')}
+        ${field('usesPerBulk', 'Số lần sử dụng mỗi cuộn', o.usesPerBulk || '', 'decimal', false, false, 'VD: 20', 'oninput="recalcBulkUnitCost()"')}
+      </div>
+
+      ${field('costPrice', 'Giá nhập đơn vị (₫)', o.costPrice ?? '', 'money', true, false, 'VD: 50000 (hoặc tự tính từ cuộn)')}
+      ${field('sellPrice', 'Giá bán đơn vị thu khách (₫)', o.sellPrice ?? '', 'money', true, false, 'VD: 70000')}
+      ${field('date', 'Ngày ghi nhận', o.date || dateKey(), 'date', true)}
+      ${field('note', 'Ghi chú thêm', o.note || '', 'text', false, false, 'Ghi chú vật tư…')}
+    `;
     return;
   }
 
   if (kind === 'finance') {
-    const cats = ['Phí dịch vụ', 'Phí mua hộ', 'Cước vận chuyển', 'Chi phí phát sinh', 'Tiền mua hàng', 'Đóng gói', 'Hoàn tiền', 'Đi lại', 'Ăn uống', 'Công cụ', 'Khác'];
+    const cats = ['Phí dịch vụ', 'Phí mua hộ', 'Đóng gói', 'Cước vận chuyển', 'Chi phí phát sinh', 'Tiền mua hàng', 'Hoàn tiền', 'Đi lại', 'Ăn uống', 'Công cụ', 'Khác'];
     document.getElementById('formFields').innerHTML =
       selectField('type', 'Loại giao dịch', ['Thu', 'Chi'], o.type || 'Thu') +
       field('amount', 'Số tiền (₫)', o.amount ?? '', 'money', true, false, 'Ví dụ: 500000 hoặc 500.000') +
@@ -2570,8 +3910,10 @@ function renderFields(kind, o) {
     s +=
       field('waybill', 'Mã vận đơn Trung Quốc', o.waybill || '', 'text', true, false, 'SF..., YT..., ZTO...') +
       field('product', 'Tên sản phẩm', o.product || '', 'text', true, false, 'Ví dụ: Áo khoác dạ') +
-      field('qty', 'Số lượng', o.qty ?? 1, 'decimal') +
+      field('qty', 'Số lượng kiện', o.qty ?? 1, 'decimal') +
       field('value', 'Giá trị hàng (¥)', o.value ?? '', 'decimal', false, false, 'Ví dụ: 168.5') +
+      selectField('packagingType', '🪵 Quy cách đóng gói', packagingTypes, o.packagingType || packagingTypes[0]) +
+      field('packCharge', 'Phí đóng gói dự kiến (₫)', o.packCharge ?? '', 'money', false, false, 'VD: 50000') +
       field('appOrder', 'Mã đơn trên sàn (nếu có)', o.appOrder || '', 'text') +
       field('image', 'Link ảnh sản phẩm', o.image || '', 'text', false, false, 'https://...') +
       selectField('status', 'Trạng thái vận chuyển', shipStages, o.status || shipStages[0], true) +
@@ -2607,10 +3949,10 @@ function describeOrderChanges(prev, next) {
   if (prev.packages !== next.packages) diffs.push(`Số kiện: ${prev.packages} → ${next.packages}`);
   if (prev.status !== next.status) diffs.push(`Trạng thái: ${prev.status} → ${next.status}`);
   if (prev.shipCharge !== next.shipCharge || prev.shipCost !== next.shipCost) diffs.push(`Cước (Gốc ${money(next.shipCost)} / Thu ${money(next.shipCharge)} ₫)`);
+  if ((prev.packagingType || '') !== (next.packagingType || '') || prev.packCharge !== next.packCharge) diffs.push(`Đóng gói: ${next.packagingType} (+${money(next.packCharge)} ₫)`);
   if (prev.rateBuy !== next.rateBuy || prev.rateSell !== next.rateSell || prev.goodsCny !== next.goodsCny) diffs.push('Tệ/Tỷ giá cập nhật');
   if (prev.customerPaid !== next.customerPaid) diffs.push(`Khách trả: ${money(prev.customerPaid)} → ${money(next.customerPaid)} ₫`);
   if (prev.warehousePaid !== next.warehousePaid) diffs.push(next.warehousePaid ? 'Đã trả kho' : 'Chưa trả kho');
-  if (prev.partnerPaid !== next.partnerPaid) diffs.push(next.partnerPaid ? 'Đã chuyển vốn hàng' : 'Chưa chuyển vốn hàng');
   if ((prev.note || '') !== (next.note || '')) diffs.push('Cập nhật ghi chú');
   return diffs.length ? diffs.join(' · ') : 'Lưu cập nhật thông tin đơn';
 }
@@ -2620,9 +3962,113 @@ function saveRecord(e) {
   hideFormError();
   const form = e.currentTarget;
   const kind = form.dataset.kind;
+  if (kind === 'role_info') {
+    closeModal();
+    return;
+  }
   const id = form.dataset.id;
   const stamp = nowStamp();
   const stampFull = nowStamp(true);
+
+  if (kind === 'extraship') {
+    const orderCode = val('orderCode');
+    const customer = val('customer');
+    const content = val('content');
+    const amount = Math.round(parseNum(val('amount')));
+    if (!orderCode) {
+      showFormError('Vui lòng nhập Mã đơn hàng.', 'orderCode');
+      return;
+    }
+    if (!customer) {
+      showFormError('Vui lòng nhập Tên khách hàng.', 'customer');
+      return;
+    }
+    if (!content) {
+      showFormError('Vui lòng nhập Nội dung phát sinh.', 'content');
+      return;
+    }
+    if (amount <= 0) {
+      showFormError('Vui lòng nhập Số tiền lớn hơn 0.', 'amount');
+      return;
+    }
+    if (!Array.isArray(db.extraShipments)) db.extraShipments = [];
+    const prev = db.extraShipments.find(x => x.id === id);
+    const status = val('status') || 'Chưa thu';
+    const rawPaid = Math.round(parseNum(val('paidAmount')));
+    const paidAmount = status === 'Đã thu' ? amount : status === 'Chưa thu' ? 0 : Math.min(amount, Math.max(0, rawPaid));
+    const history = Array.isArray(prev?.history) ? [...prev.history] : [];
+
+    const item = {
+      id: id || makeId(),
+      orderId: val('orderId') || prev?.orderId || '',
+      orderCode,
+      customer,
+      content,
+      amount,
+      paidAmount,
+      date: val('date') || dateKey(),
+      status,
+      updatedAt: stamp,
+      history
+    };
+    const detail = `${item.orderCode} · ${item.customer}: ${money(item.amount)} ₫ (${item.status})`;
+    item.history.unshift({ time: stampFull, action: prev ? 'Chỉnh sửa' : 'Tạo mới', detail });
+    addAuditLog(prev ? 'Sửa cước ship phát sinh' : 'Thêm cước ship phát sinh', `${item.customer} (${item.orderCode})`, detail);
+
+    db.extraShipments = prev ? db.extraShipments.map(x => x.id === id ? item : x) : [item, ...db.extraShipments];
+    if (!persist()) return;
+    closeModal();
+    render();
+    toast(`✓ Đã lưu Cước ship phát sinh (${stamp})`);
+    return;
+  }
+
+  if (kind === 'packitem') {
+    const name = val('name');
+    const costPrice = Math.round(parseNum(val('costPrice')));
+    const sellPrice = Math.round(parseNum(val('sellPrice')));
+    if (!name) {
+      showFormError('Vui lòng nhập Tên sản phẩm đóng gói.', 'name');
+      return;
+    }
+    if (costPrice < 0 || sellPrice <= 0) {
+      showFormError('Vui lòng nhập Giá bán lớn hơn 0.', 'sellPrice');
+      return;
+    }
+    if (!Array.isArray(db.packagingCatalog)) db.packagingCatalog = [];
+    const prev = db.packagingCatalog.find(x => x.id === id);
+    const history = Array.isArray(prev?.history) ? [...prev.history] : [];
+    const category = val('category') || 'wood';
+
+    const item = {
+      id: id || makeId(),
+      category,
+      name,
+      spec: val('spec'),
+      unit: val('unit') || 'Cái',
+      bulkCost: Math.round(parseNum(val('bulkCost'))),
+      usesPerBulk: parseNum(val('usesPerBulk')) || 1,
+      costPrice,
+      sellPrice,
+      qty: Math.max(0, parseNum(val('qty'))),
+      date: val('date') || dateKey(),
+      note: stampNote(val('note'), prev?.note || ''),
+      updatedAt: stamp,
+      history
+    };
+    const unitProf = item.sellPrice - item.costPrice;
+    const detail = `Giá nhập ${money(item.costPrice)} ₫ · Giá bán ${money(item.sellPrice)} ₫ · Lãi ĐV +${money(unitProf)} ₫ · SL ${numFmt(item.qty)}`;
+    item.history.unshift({ time: stampFull, action: prev ? 'Chỉnh sửa' : 'Tạo mới', detail });
+    addAuditLog(prev ? 'Sửa SP đóng gói' : 'Thêm SP đóng gói', item.name, detail);
+
+    db.packagingCatalog = prev ? db.packagingCatalog.map(x => x.id === id ? item : x) : [item, ...db.packagingCatalog];
+    incTab = category;
+    if (!persist()) return;
+    closeModal();
+    render();
+    toast(`✓ Đã lưu sản phẩm đóng gói (${stamp})`);
+    return;
+  }
 
   if (kind === 'order') {
     const customer = val('customer');
@@ -2736,6 +4182,8 @@ function saveRecord(e) {
   if (kind === 'shipment') {
     o.waybill = val('waybill');
     o.appOrder = val('appOrder');
+    o.packagingType = val('packagingType') || packagingTypes[0];
+    o.packCharge = parseNum(val('packCharge'));
     o.sourcePurchaseId = val('sourcePurchaseId') || prev?.sourcePurchaseId || '';
     (db.orderNotes || []).forEach(ord => {
       const sameLink = ord.sourceShipmentId === o.id || (o.sourcePurchaseId && ord.sourcePurchaseId === o.sourcePurchaseId);
@@ -2779,10 +4227,16 @@ function deleteRecord(confirmedInline = false) {
   const id = f.dataset.id;
   if (!id) return;
   if (!confirmedInline && !confirm('Xóa mục này khỏi danh sách?')) return;
-  const key = kind === 'order' ? 'orderNotes' : kind === 'shipment' ? 'shipments' : kind === 'purchase' ? 'purchases' : 'transactions';
+  const key =
+    kind === 'order' ? 'orderNotes' :
+    kind === 'shipment' ? 'shipments' :
+    kind === 'purchase' ? 'purchases' :
+    kind === 'extraship' ? 'extraShipments' :
+    kind === 'packitem' ? 'packagingCatalog' :
+    'transactions';
   const target = (db[key] || []).find(x => x.id === id);
   db[key] = (db[key] || []).filter(x => x.id !== id);
-  addAuditLog('Xóa bản ghi', target?.customer || target?.category || 'Bản ghi', `Đã xóa ${target?.product || target?.category || id}`);
+  addAuditLog('Xóa bản ghi', target?.customer || target?.name || target?.category || 'Bản ghi', `Đã xóa ${target?.product || target?.name || target?.content || target?.category || id}`);
   persist();
   closeModal();
   render();
@@ -2825,13 +4279,13 @@ function toast(s) {
 }
 
 function exportData() {
-  const blob = new Blob([JSON.stringify({ version: 2, exportedAt: nowStamp(true), ...db }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ system: 'DAIRYCOW LOGISTICS', version: 2, exportedAt: nowStamp(true), ...db }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `sao-luu-quan-ly-minh-${dateKey()}.json`;
+  a.download = `dairycow-logistics-backup-${dateKey()}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 500);
-  toast('↓ Đã tải tệp sao lưu dữ liệu');
+  toast('↓ Đã tải tệp sao lưu DAIRYCOW LOGISTICS');
 }
 
 function importData(e) {
@@ -2848,6 +4302,8 @@ function importData(e) {
         shipments: Array.isArray(d.shipments) ? d.shipments : [],
         purchases: Array.isArray(d.purchases) ? d.purchases : [],
         transactions: Array.isArray(d.transactions) ? d.transactions : [],
+        extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
+        packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
         logs: Array.isArray(d.logs) ? d.logs : []
       };
       if (confirm(`Khôi phục ${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn, ${nextDb.purchases.length} đơn mua hộ và ${nextDb.transactions.length} giao dịch? Dữ liệu hiện tại trên trình duyệt sẽ được thay thế.`)) {
@@ -2878,11 +4334,10 @@ window.addEventListener('beforeunload', e => {
   }
 });
 
-document.getElementById('today').textContent = new Intl.DateTimeFormat('vi-VN', {
-  weekday: 'long',
-  day: 'numeric',
-  month: 'long',
-  year: 'numeric'
-}).format(new Date());
+if (localStorage.getItem(THEME_KEY) === 'purple') {
+  document.body.classList.add('theme-purple');
+}
+
+document.getElementById('today').textContent = 'LOGISTICS · WMS & OMS';
 
 render();
