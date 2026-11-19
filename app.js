@@ -512,8 +512,8 @@ function calcOrderMetrics(o) {
   // 2. Phí dịch vụ = Giá cuối sản phẩm × (% : 100), cước vận chuyển tính riêng
   const serviceFee = pct > 0 ? Math.round(finalGoodsVnd * (pct / 100)) : feeManual;
 
-  // 3. Lãi tệ = Số tệ × (Tỷ giá tệ bán - Tỷ giá tệ thu/gốc)
-  const fxProfit = (includeGoods && cny > 0 && rateBuy > 0 && rateSell > 0) ? Math.round(cny * (rateSell - rateBuy)) : 0;
+  // 3. Lãi tệ = Số tệ × (Tỷ giá tệ bán - Tỷ giá tệ thu/gốc) (tự động tính ngay khi có Số tệ, Tỷ giá gốc và Tỷ giá bán)
+  const fxProfit = (cny > 0 && rateBuy > 0 && rateSell > 0) ? Math.round(cny * (rateSell - rateBuy)) : 0;
 
   // 4. Tổng phải thu từ khách (bao gồm phí dịch vụ, đóng gói và cước ship phát sinh liên kết)
   const totalCollectCustomer = (includeGoods ? finalGoodsVnd : 0) + serviceFee + packCharge + extraShipTotal;
