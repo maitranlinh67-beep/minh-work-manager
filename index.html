@@ -36,7 +36,7 @@
       </div>
 
       <div class="topright">
-        <span class="save-status" id="saveStatus" title="Dữ liệu tự động lưu an toàn trên trình duyệt này">✓ Đã lưu tự động</span>
+        <button type="button" class="save-status" id="saveStatus" onclick="openSyncModal()" title="Bấm để mở Cài đặt Đồng bộ giữa nhiều máy & Bản sao lưu tự động">✓ Đã lưu tự động</button>
 
         <button type="button" class="notif-btn" onclick="setView('overview', document.querySelector('[data-view=overview]'))" title="Việc cần xử lý & Công nợ mở">
           🔔
@@ -128,10 +128,11 @@
           <strong id="breadcrumbCurrent">Dashboard</strong>
         </div>
         <div class="breadcrumb-tools">
+          <button type="button" class="bc-tool-btn primary-chip" id="syncTopBtn" onclick="openSyncModal()" title="Đồng bộ dữ liệu 2 chiều giữa nhiều máy & Khôi phục 10 bản dự phòng tự động">☁ Đồng bộ & Sao lưu</button>
           <button type="button" class="bc-tool-btn" onclick="openRoleModal()" title="Thiết lập phân quyền người dùng">🛡 Phân quyền (<span id="activeRoleNavLabel">Admin</span>)</button>
           <button type="button" class="bc-tool-btn" onclick="openHistoryTab()" title="Xem lịch sử mọi lần chỉnh sửa">🕒 Lịch sử</button>
           <button type="button" class="bc-tool-btn" onclick="document.getElementById('importFile').click()" title="Khôi phục dữ liệu từ tệp JSON">↑ Khôi phục</button>
-          <button type="button" class="bc-tool-btn primary-chip" onclick="exportData()" title="Tải tệp sao lưu JSON về máy">↓ Sao lưu</button>
+          <button type="button" class="bc-tool-btn" onclick="exportData()" title="Tải tệp sao lưu JSON về máy">↓ Sao lưu</button>
           <input id="importFile" class="hidden" type="file" accept="application/json" onchange="importData(event)">
         </div>
       </div>

@@ -1,6 +1,8 @@
 const KEY = 'minh-work-manager-v1-data';
 const ROLE_KEY = 'dairycow-active-role';
 const THEME_KEY = 'dairycow-sidebar-theme';
+const SYNC_KEY = 'dairycow-cloud-sync-config';
+const SNAP_KEY = 'dairycow-auto-snapshots-v1';
 
 const lineTypes = ['Xách tay', 'Thanh toán hộ', 'Ký gửi kho', 'Mua hộ trọn gói', 'Khác'];
 const goodsTypes = ['Thức ăn khô', 'Gia dụng', 'Mỹ phẩm', 'Quần áo', 'Giày dép', 'Đồ cơ khí', 'Điện tử / Phụ kiện', 'Khác'];
@@ -228,13 +230,14 @@ function loadDB() {
         transactions: Array.isArray(d.transactions) ? d.transactions : [],
         extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
         packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
-        logs: Array.isArray(d.logs) ? d.logs : []
+        logs: Array.isArray(d.logs) ? d.logs : [],
+        deletedIds: (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {}
       };
     }
     const old = localStorage.getItem('linh-logistics-orders-v1');
     if (old) {
       const arr = JSON.parse(old);
-      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], extraShipments: [], packagingCatalog: samplePackagingCatalog(), logs: [] };
+      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], extraShipments: [], packagingCatalog: samplePackagingCatalog(), logs: [], deletedIds: {} };
     }
   } catch (err) {
     console.error('Lỗi đọc dữ liệu localStorage:', err);
@@ -258,12 +261,14 @@ function loadDB() {
     packagingCatalog: samplePackagingCatalog(),
     logs: [
       { id: 'l1', time: nowStamp(true), action: 'Khởi động', target: 'Hệ thống', detail: 'Sẵn sàng lưu trữ và tính toán tự động' }
-    ]
+    ],
+    deletedIds: {}
   };
 }
 
-function persist() {
+function persist(options = {}) {
   try {
+    if (!db.deletedIds || typeof db.deletedIds !== 'object') db.deletedIds = {};
     const payload = JSON.stringify(db);
     localStorage.setItem(KEY, payload);
     const verify = localStorage.getItem(KEY);
@@ -273,6 +278,13 @@ function persist() {
         el.textContent = `✓ Đã lưu ${nowStamp()}`;
         el.classList.remove('warn');
       }
+      if (!options.skipSnapshot && typeof maybeAutoSnapshot === 'function') {
+        maybeAutoSnapshot('Tự động sao lưu định kỳ');
+      }
+      if (!options.skipSync && typeof scheduleCloudSync === 'function') {
+        scheduleCloudSync();
+      }
+      if (typeof updateSyncBadge === 'function') updateSyncBadge();
       return true;
     }
     throw new Error('Không đọc lại được dữ liệu sau khi lưu');
@@ -283,7 +295,7 @@ function persist() {
       el.textContent = '⚠ Lỗi bộ nhớ! Hãy bấm Sao lưu';
       el.classList.add('warn');
     }
-    alert('Không thể lưu vào trình duyệt (có thể đang bật ẩn danh bị khóa bộ nhớ hoặc đầy dung lượng). Vui lòng bấm nút "↓ Sao lưu" để tải tệp JSON về máy!');
+    alert('Không thể lưu vào trình duyệt (có thể đang bật ẩn danh bị khóa bộ nhớ hoặc đầy dung lượng). Vui lòng bấm nút "☁ Đồng bộ & Sao lưu" để tải tệp JSON về máy!');
     return false;
   }
 }
@@ -2300,22 +2312,26 @@ function deleteExtraShip(id) {
   const item = (db.extraShipments || []).find(x => x.id === id);
   if (!item) return;
   if (!confirm(`Xóa khoản Cước ship phát sinh "${item.content || ''}" (${money(item.amount)} ₫) của khách ${item.customer || ''}?`)) return;
+  saveAutoSnapshot(`Trước khi xóa cước ship ${item.orderCode || ''}`, true);
+  markDeletedId(id);
   db.extraShipments = (db.extraShipments || []).filter(x => x.id !== id);
   addAuditLog('Xóa cước ship phát sinh', item.customer || item.orderCode || 'Cước ship', `Đã xóa ${item.content || ''} (${money(item.amount)} ₫)`);
   persist();
   render();
-  toast('Đã xóa khoản cước ship phát sinh');
+  toast('Đã xóa khoản cước ship phát sinh (đã tạo mốc dự phòng)');
 }
 
 function deletePackItem(id) {
   const item = (db.packagingCatalog || []).find(x => x.id === id);
   if (!item) return;
   if (!confirm(`Xóa sản phẩm đóng gói "${item.name}"? (Các đơn hàng cũ đã gắn sản phẩm này vẫn giữ nguyên dữ liệu lịch sử).`)) return;
+  saveAutoSnapshot(`Trước khi xóa vật tư ${item.name}`, true);
+  markDeletedId(id);
   db.packagingCatalog = (db.packagingCatalog || []).filter(x => x.id !== id);
   addAuditLog('Xóa vật tư đóng gói', item.name, `Đã xóa khỏi danh mục đóng gói`);
   persist();
   render();
-  toast(`Đã xóa "${item.name}"`);
+  toast(`Đã xóa "${item.name}" (đã tạo mốc dự phòng)`);
 }
 
 function incidentalsPage() {
@@ -3966,9 +3982,14 @@ function saveRecord(e) {
     closeModal();
     return;
   }
+  if (kind === 'sync_config') {
+    saveSyncSettingsFromModal();
+    return;
+  }
   const id = form.dataset.id;
   const stamp = nowStamp();
   const stampFull = nowStamp(true);
+  const nowMs = Date.now();
 
   if (kind === 'extraship') {
     const orderCode = val('orderCode');
@@ -4009,6 +4030,7 @@ function saveRecord(e) {
       date: val('date') || dateKey(),
       status,
       updatedAt: stamp,
+      updatedAtMs: nowMs,
       history
     };
     const detail = `${item.orderCode} · ${item.customer}: ${money(item.amount)} ₫ (${item.status})`;
@@ -4054,6 +4076,7 @@ function saveRecord(e) {
       date: val('date') || dateKey(),
       note: stampNote(val('note'), prev?.note || ''),
       updatedAt: stamp,
+      updatedAtMs: nowMs,
       history
     };
     const unitProf = item.sellPrice - item.costPrice;
@@ -4093,6 +4116,7 @@ function saveRecord(e) {
       sourceShipmentId: draft.sourceShipmentId || prev?.sourceShipmentId || '',
       note: stampedNote,
       updatedAt: stamp,
+      updatedAtMs: nowMs,
       history
     };
     const changeDesc = describeOrderChanges(prev, item);
@@ -4127,6 +4151,7 @@ function saveRecord(e) {
       method: val('method'),
       note: stampedNote,
       updatedAt: stamp,
+      updatedAtMs: nowMs,
       history
     };
     const detail = `${item.type} ${money(item.amount)} ₫ (${item.category})${item.party ? ' · ' + item.party : ''}`;
@@ -4176,6 +4201,7 @@ function saveRecord(e) {
     note: stampedNote,
     date: prev?.date || dateKey(),
     updatedAt: stamp,
+    updatedAtMs: nowMs,
     history
   };
 
@@ -4235,12 +4261,14 @@ function deleteRecord(confirmedInline = false) {
     kind === 'packitem' ? 'packagingCatalog' :
     'transactions';
   const target = (db[key] || []).find(x => x.id === id);
+  saveAutoSnapshot(`Trước khi xóa ${target?.customer || target?.name || id}`, true);
+  markDeletedId(id);
   db[key] = (db[key] || []).filter(x => x.id !== id);
   addAuditLog('Xóa bản ghi', target?.customer || target?.name || target?.category || 'Bản ghi', `Đã xóa ${target?.product || target?.name || target?.content || target?.category || id}`);
   persist();
   closeModal();
   render();
-  toast(`Đã xóa bản ghi (${nowStamp()})`);
+  toast(`Đã xóa bản ghi (đã tạo mốc dự phòng · ${nowStamp()})`);
 }
 
 function deleteItemDirect(kind, id) {
@@ -4252,22 +4280,26 @@ function deleteItemDirect(kind, id) {
     kind === 'shipment' ? `vận đơn "${item.waybill} · ${item.product}"` :
     `yêu cầu mua hộ "${item.product}"`;
   if (!confirm(`Bạn có chắc muốn xóa ${label} của khách ${item.customer}?`)) return;
+  saveAutoSnapshot(`Trước khi xóa ${item.customer}`, true);
+  markDeletedId(id);
   db[key] = db[key].filter(x => x.id !== id);
   addAuditLog('Xóa bản ghi', `${item.customer}`, `Đã xóa ${label}`);
   persist();
   render();
-  toast(`Đã xóa (${nowStamp()})`);
+  toast(`Đã xóa (đã tạo mốc dự phòng · ${nowStamp()})`);
 }
 
 function deleteTransaction(id) {
   const item = (db.transactions || []).find(x => x.id === id);
   const desc = item ? `${item.type} ${money(item.amount)} ₫ (${item.category})` : 'khoản thu chi này';
   if (!confirm(`Xóa ${desc}?`)) return;
+  saveAutoSnapshot(`Trước khi xóa thu chi`, true);
+  markDeletedId(id);
   db.transactions = db.transactions.filter(x => x.id !== id);
   addAuditLog('Xóa thu chi', item?.category || 'Thu chi', `Đã xóa ${desc}`);
   persist();
   render();
-  toast(`Đã xóa khoản thu chi (${nowStamp()})`);
+  toast(`Đã xóa khoản thu chi (đã tạo mốc dự phòng · ${nowStamp()})`);
 }
 
 function toast(s) {
@@ -4288,7 +4320,7 @@ function exportData() {
   toast('↓ Đã tải tệp sao lưu DAIRYCOW LOGISTICS');
 }
 
-function importData(e) {
+function importData(e, mergeMode = false) {
   const f = e.target.files[0];
   if (!f) return;
   const r = new FileReader();
@@ -4304,14 +4336,27 @@ function importData(e) {
         transactions: Array.isArray(d.transactions) ? d.transactions : [],
         extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
         packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
-        logs: Array.isArray(d.logs) ? d.logs : []
+        logs: Array.isArray(d.logs) ? d.logs : [],
+        deletedIds: (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {}
       };
-      if (confirm(`Khôi phục ${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn, ${nextDb.purchases.length} đơn mua hộ và ${nextDb.transactions.length} giao dịch? Dữ liệu hiện tại trên trình duyệt sẽ được thay thế.`)) {
-        db = nextDb;
-        addAuditLog('Khôi phục dữ liệu', 'Hệ thống', `Nhập tệp JSON (${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn)`);
-        persist();
-        render();
-        toast('✓ Đã khôi phục dữ liệu thành công');
+      if (mergeMode) {
+        if (confirm(`Gộp thêm an toàn ${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn, ${nextDb.purchases.length} đơn mua hộ từ tệp JSON? Dữ liệu hiện tại KHÔNG bị xóa.`)) {
+          saveAutoSnapshot('Trước khi gộp tệp JSON', true);
+          db = smartMergeDB(db, nextDb, { ignoreDeletes: true });
+          addAuditLog('Gộp dữ liệu JSON', 'Hệ thống', `Gộp an toàn tệp JSON (${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn)`);
+          persist();
+          render();
+          toast('✓ Đã gộp dữ liệu an toàn (không mất dữ liệu cũ)');
+        }
+      } else {
+        if (confirm(`Khôi phục ${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn, ${nextDb.purchases.length} đơn mua hộ và ${nextDb.transactions.length} giao dịch?\n\nHệ thống sẽ tự động chụp 1 bản dự phòng dữ liệu hiện tại trước khi khôi phục.`)) {
+          saveAutoSnapshot('Trước khi khôi phục tệp JSON', true);
+          db = nextDb;
+          addAuditLog('Khôi phục dữ liệu', 'Hệ thống', `Nhập tệp JSON (${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn)`);
+          persist();
+          render();
+          toast('✓ Đã khôi phục dữ liệu thành công');
+        }
       }
     } catch {
       alert('Tệp không đúng định dạng bản sao lưu JSON của ứng dụng.');
@@ -4320,6 +4365,604 @@ function importData(e) {
   };
   r.readAsText(f);
 }
+
+/* ============================================================
+   HỆ THỐNG ĐỒNG BỘ 2 CHIỀU (FIREBASE REST) & CHỐNG MẤT DỮ LIỆU
+   Nguyên tắc: KHÔNG BAO GIỜ tự xóa dữ liệu người dùng.
+   ============================================================ */
+let syncDebounceTimer = null;
+let syncPollTimer = null;
+let syncInFlight = false;
+let lastAutoSnapTs = 0;
+
+function markDeletedId(id) {
+  if (!id) return;
+  if (!db.deletedIds || typeof db.deletedIds !== 'object') db.deletedIds = {};
+  db.deletedIds[id] = Date.now();
+}
+
+function loadSyncConfig() {
+  try {
+    const raw = localStorage.getItem(SYNC_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        url: String(parsed.url || '').trim(),
+        room: String(parsed.room || 'dairycow-main').trim() || 'dairycow-main',
+        autoSync: parsed.autoSync !== false,
+        lastSyncAt: String(parsed.lastSyncAt || '')
+      };
+    }
+  } catch {}
+  return { url: '', room: 'dairycow-main', autoSync: true, lastSyncAt: '' };
+}
+
+function saveSyncConfig(cfg) {
+  try {
+    localStorage.setItem(SYNC_KEY, JSON.stringify(cfg));
+  } catch {}
+  updateSyncBadge();
+}
+
+function cleanFirebaseUrl(url) {
+  let u = String(url || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  u = u.replace(/\/+$/, '');
+  u = u.replace(/\.json$/i, '');
+  return u;
+}
+
+function cleanRoomId(room) {
+  return String(room || 'dairycow-main')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'dairycow-main';
+}
+
+function dbCounts(d = db) {
+  return {
+    orderNotes: (d.orderNotes || []).length,
+    shipments: (d.shipments || []).length,
+    purchases: (d.purchases || []).length,
+    transactions: (d.transactions || []).length,
+    extraShipments: (d.extraShipments || []).length,
+    packagingCatalog: (d.packagingCatalog || []).length
+  };
+}
+
+function loadAutoSnapshots() {
+  try {
+    const raw = localStorage.getItem(SNAP_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr;
+    }
+  } catch {}
+  return [];
+}
+
+function saveAutoSnapshot(reason = 'Tự động sao lưu', force = false) {
+  const now = Date.now();
+  if (!force && now - lastAutoSnapTs < 5 * 60 * 1000) return false;
+  lastAutoSnapTs = now;
+  try {
+    const snaps = loadAutoSnapshots();
+    const snapshot = {
+      id: 'snap_' + now.toString(36) + Math.random().toString(36).slice(2, 5),
+      ts: now,
+      time: nowStamp(true),
+      reason: String(reason || 'Tự động sao lưu'),
+      counts: dbCounts(db),
+      data: JSON.parse(JSON.stringify(db))
+    };
+    const next = [snapshot, ...snaps].slice(0, 10);
+    while (next.length > 0) {
+      try {
+        localStorage.setItem(SNAP_KEY, JSON.stringify(next));
+        return true;
+      } catch {
+        next.pop();
+      }
+    }
+  } catch {}
+  return false;
+}
+
+function maybeAutoSnapshot(reason = 'Tự động sao lưu định kỳ') {
+  saveAutoSnapshot(reason, false);
+}
+
+function restoreAutoSnapshot(snapId) {
+  const snaps = loadAutoSnapshots();
+  const target = snaps.find(s => s.id === snapId);
+  if (!target || !target.data) {
+    toast('Không tìm thấy bản dự phòng này.');
+    return;
+  }
+  const c = target.counts || dbCounts(target.data);
+  if (!confirm(`Khôi phục dữ liệu về mốc "${target.time}" (${target.reason})?\n\n• Note đơn: ${c.orderNotes} · Vận đơn: ${c.shipments} · Mua hộ: ${c.purchases} · Thu chi: ${c.transactions}\n\n(Hệ thống sẽ tự lưu 1 bản dự phòng trạng thái hiện tại trước khi khôi phục.)`)) {
+    return;
+  }
+  saveAutoSnapshot('Trước khi khôi phục mốc cũ', true);
+  const d = target.data;
+  db = {
+    orderNotes: Array.isArray(d.orderNotes) ? d.orderNotes : [],
+    shipments: Array.isArray(d.shipments) ? d.shipments : [],
+    purchases: Array.isArray(d.purchases) ? d.purchases : [],
+    transactions: Array.isArray(d.transactions) ? d.transactions : [],
+    extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
+    packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
+    logs: Array.isArray(d.logs) ? d.logs : [],
+    deletedIds: (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {}
+  };
+  addAuditLog('Khôi phục mốc dự phòng', 'Hệ thống', `Khôi phục về mốc ${target.time} (${target.reason})`);
+  persist({ skipSnapshot: true });
+  render();
+  if (document.getElementById('modal')?.classList.contains('open')) openSyncModal();
+  toast(`✓ Đã khôi phục về mốc ${target.time}`);
+}
+
+function isUntouchedSeedDB(candidate) {
+  if (!candidate || typeof candidate !== 'object') return false;
+  const seedOrderIds = new Set(['on1', 'on2']);
+  const seedShipIds = new Set(['s1', 's2', 's3']);
+  const seedBuyIds = new Set(['p1', 'p2']);
+  const seedTxIds = new Set(['t1', 't2']);
+  const seedPackIds = new Set(['pk_wood_1', 'pk_carton_1', 'pk_shock_1', 'pk_shock_2']);
+
+  const orders = candidate.orderNotes || [];
+  const ships = candidate.shipments || [];
+  const buys = candidate.purchases || [];
+  const txs = candidate.transactions || [];
+  const extras = candidate.extraShipments || [];
+  const packs = candidate.packagingCatalog || [];
+
+  if (extras.length > 0) return false;
+  if (orders.some(x => !seedOrderIds.has(x.id) || (x.history && x.history.length > 1) || x.updatedAtMs)) return false;
+  if (ships.some(x => !seedShipIds.has(x.id) || (x.history && x.history.length > 0) || x.updatedAtMs)) return false;
+  if (buys.some(x => !seedBuyIds.has(x.id) || (x.history && x.history.length > 0) || x.updatedAtMs)) return false;
+  if (txs.some(x => !seedTxIds.has(x.id) || (x.history && x.history.length > 0) || x.updatedAtMs)) return false;
+  if (packs.some(x => !seedPackIds.has(x.id) || (x.history && x.history.length > 0) || x.updatedAtMs)) return false;
+  return true;
+}
+
+function normalizeIncomingDB(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const toArr = v => Array.isArray(v) ? v.filter(Boolean) : (v && typeof v === 'object' ? Object.values(v).filter(Boolean) : []);
+  return {
+    orderNotes: toArr(raw.orderNotes),
+    shipments: toArr(raw.shipments),
+    purchases: toArr(raw.purchases),
+    transactions: toArr(raw.transactions),
+    extraShipments: toArr(raw.extraShipments),
+    packagingCatalog: toArr(raw.packagingCatalog),
+    logs: toArr(raw.logs),
+    deletedIds: (raw.deletedIds && typeof raw.deletedIds === 'object') ? { ...raw.deletedIds } : {}
+  };
+}
+
+function smartMergeDB(localDb, remoteRaw, opts = {}) {
+  const remoteDb = normalizeIncomingDB(remoteRaw);
+  if (!remoteDb) return localDb;
+
+  const remoteHasData =
+    remoteDb.orderNotes.length + remoteDb.shipments.length + remoteDb.purchases.length +
+    remoteDb.transactions.length + remoteDb.extraShipments.length > 0;
+
+  // Nếu máy mới mở lần đầu (chỉ có dữ liệu mẫu chưa sửa) và trên mây đã có dữ liệu thật -> tải thẳng dữ liệu thật về
+  if (remoteHasData && isUntouchedSeedDB(localDb)) {
+    return {
+      orderNotes: remoteDb.orderNotes,
+      shipments: remoteDb.shipments,
+      purchases: remoteDb.purchases,
+      transactions: remoteDb.transactions,
+      extraShipments: remoteDb.extraShipments,
+      packagingCatalog: remoteDb.packagingCatalog.length ? remoteDb.packagingCatalog : samplePackagingCatalog(),
+      logs: remoteDb.logs.slice(0, 300),
+      deletedIds: remoteDb.deletedIds || {}
+    };
+  }
+
+  // Gộp danh sách ID đã được người dùng chủ động bấm Xóa
+  const mergedDeleted = opts.ignoreDeletes ? {} : { ...(localDb.deletedIds || {}) };
+  if (!opts.ignoreDeletes) {
+    Object.entries(remoteDb.deletedIds || {}).forEach(([k, ts]) => {
+      const nTs = Number(ts) || 0;
+      if (!mergedDeleted[k] || nTs > mergedDeleted[k]) mergedDeleted[k] = nTs;
+    });
+  }
+
+  const mergeList = (localArr = [], remoteArr = []) => {
+    const map = new Map();
+    const put = (item, source) => {
+      if (!item || !item.id) return;
+      const delTs = mergedDeleted[item.id] || 0;
+      const itemTs = Number(item.updatedAtMs) || 0;
+      // Chỉ bỏ qua nếu người dùng đã chủ động bấm Xóa SAU thời điểm bản ghi được sửa
+      if (delTs && itemTs < delTs) return;
+
+      const existing = map.get(item.id);
+      if (!existing) {
+        map.set(item.id, { item, source });
+        return;
+      }
+      const exTs = Number(existing.item.updatedAtMs) || 0;
+      if (itemTs > exTs) {
+        map.set(item.id, { item, source });
+      } else if (itemTs === exTs) {
+        const exHist = Array.isArray(existing.item.history) ? existing.item.history.length : 0;
+        const inHist = Array.isArray(item.history) ? item.history.length : 0;
+        if (inHist > exHist) map.set(item.id, { item, source });
+      }
+    };
+    (localArr || []).forEach(x => put(x, 'local'));
+    (remoteArr || []).forEach(x => put(x, 'remote'));
+    return Array.from(map.values()).map(v => v.item);
+  };
+
+  const mergedLogs = mergeList(localDb.logs, remoteDb.logs).slice(0, 300);
+  const mergedPack = mergeList(localDb.packagingCatalog, remoteDb.packagingCatalog);
+
+  return {
+    orderNotes: mergeList(localDb.orderNotes, remoteDb.orderNotes),
+    shipments: mergeList(localDb.shipments, remoteDb.shipments),
+    purchases: mergeList(localDb.purchases, remoteDb.purchases),
+    transactions: mergeList(localDb.transactions, remoteDb.transactions),
+    extraShipments: mergeList(localDb.extraShipments, remoteDb.extraShipments),
+    packagingCatalog: mergedPack.length ? mergedPack : samplePackagingCatalog(),
+    logs: mergedLogs,
+    deletedIds: mergedDeleted
+  };
+}
+
+function updateSyncBadge(state = '') {
+  const cfg = loadSyncConfig();
+  const statusEl = document.getElementById('saveStatus');
+  const topBtn = document.getElementById('syncTopBtn');
+  const enabled = Boolean(cleanFirebaseUrl(cfg.url));
+
+  if (state === 'syncing') {
+    if (statusEl) {
+      statusEl.textContent = '↻ Đang đồng bộ mây...';
+      statusEl.classList.remove('warn');
+    }
+    if (topBtn) topBtn.textContent = '↻ Đang đồng bộ...';
+    return;
+  }
+
+  if (state === 'error') {
+    if (statusEl) {
+      statusEl.textContent = '⚠ Offline · Đã lưu trên máy';
+      statusEl.classList.add('warn');
+    }
+    if (topBtn) topBtn.textContent = '⚠ Đồng bộ (Offline)';
+    return;
+  }
+
+  if (enabled) {
+    const t = cfg.lastSyncAt || nowStamp();
+    if (statusEl) {
+      statusEl.textContent = `☁ Đã đồng bộ ${t}`;
+      statusEl.classList.remove('warn');
+    }
+    if (topBtn) topBtn.textContent = `☁ Đã đồng bộ · ${cleanRoomId(cfg.room)}`;
+  } else {
+    if (statusEl && !statusEl.textContent.includes('Lỗi bộ nhớ')) {
+      statusEl.textContent = `✓ Lưu trên máy · ${nowStamp()}`;
+      statusEl.classList.remove('warn');
+    }
+    if (topBtn) topBtn.textContent = '☁ Đồng bộ & Sao lưu';
+  }
+}
+
+function scheduleCloudSync() {
+  const cfg = loadSyncConfig();
+  if (!cleanFirebaseUrl(cfg.url)) return;
+  if (syncDebounceTimer) clearTimeout(syncDebounceTimer);
+  syncDebounceTimer = setTimeout(() => {
+    syncNow(true);
+  }, 1200);
+}
+
+async function syncNow(silent = false) {
+  const cfg = loadSyncConfig();
+  const baseUrl = cleanFirebaseUrl(cfg.url);
+  if (!baseUrl) {
+    if (!silent) toast('Chưa cấu hình đường dẫn Đồng bộ đám mây.');
+    return false;
+  }
+  if (syncInFlight) return false;
+  syncInFlight = true;
+  updateSyncBadge('syncing');
+
+  const room = cleanRoomId(cfg.room);
+  const endpoint = `${baseUrl}/rooms/${encodeURIComponent(room)}.json`;
+
+  try {
+    const getRes = await fetch(endpoint, { method: 'GET', cache: 'no-store' });
+    if (!getRes.ok) throw new Error(`HTTP ${getRes.status} khi đọc dữ liệu đám mây`);
+    const remoteData = await getRes.json();
+
+    const beforeStr = JSON.stringify(db);
+    const merged = remoteData ? smartMergeDB(db, remoteData) : db;
+    const afterStr = JSON.stringify(merged);
+
+    if (afterStr !== beforeStr) {
+      saveAutoSnapshot('Trước khi nhận dữ liệu đồng bộ từ mây', false);
+      db = merged;
+      localStorage.setItem(KEY, afterStr);
+      render();
+    }
+
+    const payload = {
+      ...db,
+      _meta: {
+        system: 'DAIRYCOW LOGISTICS',
+        room,
+        syncedAt: nowStamp(true),
+        syncedAtMs: Date.now()
+      }
+    };
+
+    const putRes = await fetch(endpoint, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!putRes.ok) throw new Error(`HTTP ${putRes.status} khi đẩy dữ liệu lên đám mây`);
+
+    cfg.lastSyncAt = nowStamp();
+    saveSyncConfig(cfg);
+    updateSyncBadge('synced');
+    if (!silent) toast(`☁ Đồng bộ thành công với kho "${room}" (${cfg.lastSyncAt})`);
+    return true;
+  } catch (err) {
+    console.error('Lỗi đồng bộ đám mây:', err);
+    updateSyncBadge('error');
+    if (!silent) {
+      alert(`Không kết nối được đám mây (${err.message || 'Lỗi mạng'}).\n\nDữ liệu trên máy bạn vẫn được LƯU AN TOÀN, không bị mất. Hãy kiểm tra lại Link Firebase Realtime Database và quyền truy cập Rules (read/write: true).`);
+    }
+    return false;
+  } finally {
+    syncInFlight = false;
+  }
+}
+
+function startCloudSyncLoop() {
+  if (syncPollTimer) clearInterval(syncPollTimer);
+  syncPollTimer = setInterval(() => {
+    const cfg = loadSyncConfig();
+    if (!cleanFirebaseUrl(cfg.url) || !cfg.autoSync) return;
+    if (document.hidden) return;
+    if (document.getElementById('modal')?.classList.contains('open')) return;
+    syncNow(true);
+  }, 15000);
+}
+
+function buildSyncShareLink() {
+  const cfg = loadSyncConfig();
+  const baseUrl = cleanFirebaseUrl(cfg.url);
+  if (!baseUrl) return '';
+  const payload = JSON.stringify({ u: baseUrl, r: cleanRoomId(cfg.room) });
+  const b64 = btoa(unescape(encodeURIComponent(payload)));
+  const pageUrl = window.location.origin + window.location.pathname;
+  return `${pageUrl}#sync=${encodeURIComponent(b64)}`;
+}
+
+function copySyncShareLink() {
+  const urlInput = document.getElementById('f_syncUrl');
+  const roomInput = document.getElementById('f_syncRoom');
+  if (urlInput && urlInput.value.trim()) {
+    const cfg = loadSyncConfig();
+    cfg.url = cleanFirebaseUrl(urlInput.value);
+    cfg.room = cleanRoomId(roomInput ? roomInput.value : cfg.room);
+    saveSyncConfig(cfg);
+  }
+  const link = buildSyncShareLink();
+  if (!link) {
+    alert('Vui lòng nhập Link Firebase Realtime Database trước khi chép link gửi bạn!');
+    return;
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(link)
+      .then(() => toast('📋 Đã chép link đồng bộ! Gửi link này cho bạn qua Zalo để mở là tự kết nối.'))
+      .catch(() => prompt('Sao chép đường dẫn đồng bộ dưới đây gửi cho bạn:', link));
+  } else {
+    prompt('Sao chép đường dẫn đồng bộ dưới đây gửi cho bạn:', link);
+  }
+}
+
+function applySyncLinkFromUrl() {
+  try {
+    const hash = window.location.hash || '';
+    const match = hash.match(/sync=([^&]+)/);
+    if (!match) return false;
+    const raw = decodeURIComponent(match[1]);
+    const parsed = JSON.parse(decodeURIComponent(escape(atob(raw))));
+    if (parsed && parsed.u) {
+      const cfg = {
+        url: cleanFirebaseUrl(parsed.u),
+        room: cleanRoomId(parsed.r || 'dairycow-main'),
+        autoSync: true,
+        lastSyncAt: ''
+      };
+      saveSyncConfig(cfg);
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+      toast(`☁ Đã tự động kết nối kho đồng bộ "${cfg.room}"!`);
+      setTimeout(() => syncNow(false), 400);
+      return true;
+    }
+  } catch (err) {
+    console.error('Lỗi đọc link đồng bộ:', err);
+  }
+  return false;
+}
+
+function triggerManualSnapshot() {
+  saveAutoSnapshot('Người dùng chủ động tạo mốc dự phòng', true);
+  toast('🛡 Đã chụp mốc dự phòng an toàn trên máy!');
+  openSyncModal();
+}
+
+function disableCloudSync() {
+  if (!confirm('Tắt đồng bộ đám mây trên máy này? Dữ liệu đang có trên máy và trên mây đều KHÔNG bị xóa.')) return;
+  const cfg = loadSyncConfig();
+  cfg.url = '';
+  saveSyncConfig(cfg);
+  toast('Đã tắt đồng bộ đám mây (dữ liệu trên máy vẫn giữ nguyên).');
+  openSyncModal();
+}
+
+function saveSyncSettingsFromModal() {
+  const urlRaw = document.getElementById('f_syncUrl')?.value || '';
+  const roomRaw = document.getElementById('f_syncRoom')?.value || 'dairycow-main';
+  const autoSync = Boolean(document.getElementById('f_syncAuto')?.checked);
+
+  const cleanUrl = cleanFirebaseUrl(urlRaw);
+  if (cleanUrl && !/^https:\/\/.+\.(firebaseio\.com|firebasedatabase\.app)$/i.test(cleanUrl)) {
+    if (!confirm('Link vừa nhập không có đuôi .firebaseio.com hoặc .firebasedatabase.app. Bạn vẫn muốn thử kết nối?')) {
+      return;
+    }
+  }
+  const cfg = {
+    url: cleanUrl,
+    room: cleanRoomId(roomRaw),
+    autoSync,
+    lastSyncAt: ''
+  };
+  saveSyncConfig(cfg);
+  if (cleanUrl) {
+    syncNow(false).then(ok => {
+      if (ok && document.getElementById('modal')?.classList.contains('open')) {
+        openSyncModal();
+      }
+    });
+  } else {
+    toast('✓ Đã lưu cài đặt (chế độ lưu trên máy).');
+    closeModal();
+  }
+}
+
+function openSyncModal() {
+  const form = document.getElementById('recordForm');
+  form.reset();
+  form.dataset.kind = 'sync_config';
+  form.dataset.id = '';
+  formDirty = false;
+  hideFormError();
+  document.getElementById('modalBox')?.classList.add('wide');
+  document.getElementById('modalTitle').textContent = '☁ Đồng bộ 2 chiều & Sao lưu chống mất dữ liệu';
+  document.getElementById('modalSub').textContent = 'Dữ liệu luôn được lưu trên máy trước, tự động chụp 10 mốc dự phòng và gộp an toàn — tuyệt đối không tự xóa dữ liệu.';
+  document.getElementById('deleteZone').classList.add('hidden');
+  document.getElementById('calcPreviewZone').innerHTML = '';
+  document.getElementById('recordHistoryZone').classList.add('hidden');
+
+  const cfg = loadSyncConfig();
+  const snaps = loadAutoSnapshots();
+  const counts = dbCounts(db);
+  const connected = Boolean(cleanFirebaseUrl(cfg.url));
+
+  const snapRows = snaps.length
+    ? snaps.map(s => {
+        const c = s.counts || {};
+        return `<div class="sync-snap-row">
+          <div class="sync-snap-info">
+            <strong>${esc(s.time)}</strong>
+            <span class="sync-snap-reason">${esc(s.reason)}</span>
+            <div class="sync-snap-meta">Note đơn: <b>${c.orderNotes || 0}</b> · Vận đơn: <b>${c.shipments || 0}</b> · Mua hộ: <b>${c.purchases || 0}</b> · Thu chi: <b>${c.transactions || 0}</b> · Ship PS: <b>${c.extraShipments || 0}</b></div>
+          </div>
+          <button type="button" class="btn small" onclick="restoreAutoSnapshot('${esc(s.id)}')">↺ Khôi phục</button>
+        </div>`;
+      }).join('')
+    : `<div class="sync-empty">Chưa có mốc dự phòng nào. Bấm "＋ Chụp mốc ngay" để tạo bản sao an toàn đầu tiên.</div>`;
+
+  document.getElementById('formFields').innerHTML = `
+    <div class="full sync-status-banner ${connected ? 'connected' : ''}">
+      <div>
+        <div class="sync-banner-title">${connected ? '☁ Đang bật Đồng bộ Đám mây 2 chiều' : '💾 Đang lưu an toàn trên trình duyệt máy này'}</div>
+        <div class="sync-banner-sub">Hiện có: <b>${counts.orderNotes}</b> Note đơn · <b>${counts.shipments}</b> Vận đơn · <b>${counts.purchases}</b> Mua hộ · <b>${counts.transactions}</b> Thu chi · <b>${counts.extraShipments}</b> Cước ship PS${cfg.lastSyncAt ? ` · Đồng bộ gần nhất: <b>${esc(cfg.lastSyncAt)}</b>` : ''}</div>
+      </div>
+      <div class="sync-banner-actions">
+        ${connected ? `<button type="button" class="btn small primary" onclick="syncNow(false)">↻ Đồng bộ ngay</button>` : ''}
+        <button type="button" class="btn small" onclick="exportData()">↓ Tải JSON</button>
+      </div>
+    </div>
+
+    <div class="full sync-card">
+      <div class="sync-card-head">
+        <strong>1. Đồng bộ chung cho bạn và cộng sự (Miễn phí qua Firebase)</strong>
+        <span class="sync-pill">Gộp thông minh · Không tự xóa</span>
+      </div>
+      <div class="sync-grid-2">
+        <div class="field-group">
+          <label for="f_syncUrl">Link Firebase Realtime Database</label>
+          <input id="f_syncUrl" class="field" type="url" value="${esc(cfg.url)}" placeholder="https://ten-du-an-default-rtdb.asia-southeast1.firebasedatabase.app" />
+        </div>
+        <div class="field-group">
+          <label for="f_syncRoom">Mã kho dùng chung (Room ID)</label>
+          <input id="f_syncRoom" class="field" type="text" value="${esc(cfg.room || 'dairycow-main')}" placeholder="dairycow-main" />
+        </div>
+      </div>
+      <label class="sync-check-row">
+        <input id="f_syncAuto" type="checkbox" ${cfg.autoSync ? 'checked' : ''} />
+        <span>Tự động đồng bộ nền mỗi 15 giây &amp; ngay sau khi bấm Lưu (điện thoại và máy tính tự cập nhật qua lại)</span>
+      </label>
+      <div class="sync-btn-row">
+        <button type="button" class="btn primary small" onclick="saveSyncSettingsFromModal()">✓ Lưu &amp; Đồng bộ ngay</button>
+        <button type="button" class="btn small" onclick="copySyncShareLink()">📋 Chép link cài sẵn gửi bạn</button>
+        ${connected ? `<button type="button" class="btn small" onclick="disableCloudSync()">Tắt đồng bộ</button>` : ''}
+      </div>
+      <details class="sync-guide">
+        <summary>📖 Cách lấy Link Firebase miễn phí trong 2 phút (chỉ cần làm 1 lần duy nhất)</summary>
+        <ol>
+          <li>Vào <a href="https://console.firebase.google.com" target="_blank" rel="noopener">console.firebase.google.com</a> → đăng nhập Google → bấm <b>Add project</b> (đặt tên bất kỳ, ví dụ <code>dairycow-logistics</code>).</li>
+          <li>Menu trái chọn <b>Build → Realtime Database → Create Database</b> → chọn khu vực <b>Singapore (asia-southeast1)</b> → chọn <b>Start in test mode</b> → bấm <b>Enable</b>.</li>
+          <li>Copy đường dẫn dạng <code>https://...firebasedatabase.app</code> dán vào ô phía trên rồi bấm <b>Lưu &amp; Đồng bộ ngay</b>.</li>
+          <li>Bấm <b>📋 Chép link cài sẵn gửi bạn</b> rồi gửi qua Zalo — bạn của bạn chỉ cần mở link đó là tự kết nối chung kho, không phải cài gì thêm!</li>
+        </ol>
+      </details>
+    </div>
+
+    <div class="full sync-card">
+      <div class="sync-card-head">
+        <strong>2. Kho 10 bản Tự động Dự phòng trên máy (Chống xóa nhầm)</strong>
+        <button type="button" class="btn small" onclick="triggerManualSnapshot()">＋ Chụp mốc ngay</button>
+      </div>
+      <p class="sync-note">Mỗi khi bạn xóa bản ghi, nhập file JSON, hoặc sửa dữ liệu định kỳ, hệ thống tự chụp 1 mốc dự phòng để bạn có thể quay lại bất cứ lúc nào.</p>
+      <div class="sync-snap-list">${snapRows}</div>
+    </div>
+
+    <div class="full sync-card">
+      <div class="sync-card-head">
+        <strong>3. Sao lưu &amp; Khôi phục bằng tệp JSON thủ công</strong>
+      </div>
+      <div class="sync-btn-row">
+        <button type="button" class="btn small" onclick="exportData()">↓ Tải file sao lưu JSON về máy</button>
+        <label class="btn small" style="cursor:pointer">↑ Gộp thêm từ JSON (An toàn)<input type="file" accept=".json" style="display:none" onchange="importData(event, true)" /></label>
+        <label class="btn small" style="cursor:pointer">↑ Khôi phục thay thế từ JSON<input type="file" accept=".json" style="display:none" onchange="importData(event, false)" /></label>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('saveBtn').textContent = '✓ Lưu cài đặt đồng bộ';
+  document.getElementById('modal').classList.add('open');
+}
+
+window.addEventListener('online', () => {
+  const cfg = loadSyncConfig();
+  if (cleanFirebaseUrl(cfg.url)) syncNow(true);
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    const cfg = loadSyncConfig();
+    if (cleanFirebaseUrl(cfg.url) && cfg.autoSync) syncNow(true);
+  }
+});
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && document.getElementById('modal')?.classList.contains('open')) {
@@ -4341,3 +4984,11 @@ if (localStorage.getItem(THEME_KEY) === 'purple') {
 document.getElementById('today').textContent = 'LOGISTICS · WMS & OMS';
 
 render();
+updateSyncBadge();
+startCloudSyncLoop();
+if (!applySyncLinkFromUrl()) {
+  const _initSyncCfg = loadSyncConfig();
+  if (cleanFirebaseUrl(_initSyncCfg.url) && _initSyncCfg.autoSync) {
+    setTimeout(() => syncNow(true), 600);
+  }
+}
