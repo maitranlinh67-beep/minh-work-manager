@@ -3,6 +3,8 @@ const ROLE_KEY = 'dairycow-active-role';
 const THEME_KEY = 'dairycow-sidebar-theme';
 const SYNC_KEY = 'dairycow-cloud-sync-config';
 const SNAP_KEY = 'dairycow-auto-snapshots-v1';
+const APP_TIMEZONE = 'Asia/Ho_Chi_Minh';
+const BIZ_CLOSE_DAY = 26;
 
 const lineTypes = ['Xách tay', 'Thanh toán hộ', 'Ký gửi kho', 'Mua hộ trọn gói', 'Khác'];
 const goodsTypes = ['Thức ăn khô', 'Gia dụng', 'Mỹ phẩm', 'Quần áo', 'Giày dép', 'Đồ cơ khí', 'Điện tử / Phụ kiện', 'Khác'];
@@ -45,7 +47,7 @@ const buyStages = [
 
 let db = loadDB();
 let view = 'overview';
-let financeTab = 'cashflow'; // 'cashflow' | 'debts' | 'report' | 'history'
+let financeTab = 'cashflow'; // 'cashflow' | 'debts' | 'report' | 'periods' | 'history'
 let incTab = 'extraship'; // 'extraship' | 'wood' | 'carton' | 'shock'
 let incPeriodMode = 'all'; // 'day' | 'week' | 'month' | 'custom' | 'all'
 let incDate = dateKey();
@@ -56,32 +58,96 @@ let incToDate = dateKey();
 let draftOrderPackItems = [];
 let query = '';
 let todoFilter = 'all';
-let periodMode = 'month'; // 'day' | 'month' | 'year' | 'all'
+let periodMode = 'bizperiod'; // 'bizperiod' | 'day' | 'month' | 'year' | 'all'
+let selectedBusinessPeriodId = ''; // '' => luôn bám kỳ kinh doanh đang hoạt động
+let periodDetailId = ''; // kỳ đang mở xem báo cáo đối chiếu chi tiết trong tab Kỳ chốt 26
 let periodDate = dateKey();
 let periodMonth = dateKey().slice(0, 7);
-let periodYear = String(new Date().getFullYear());
+let periodYear = String(getVNParts().year);
 let toastTimer = null;
 let formDirty = false;
 let overlayMouseDownTarget = null;
 let showCnyBox = false;
 let showPackBox = false;
 let currentUserRole = localStorage.getItem(ROLE_KEY) || 'admin';
+let syncDebounceTimer = null;
+let syncPollTimer = null;
+let syncInFlight = false;
+let lastAutoSnapTs = 0;
+let lastActiveBizPeriodId = '';
+let periodWatcherTimer = null;
 window.statusFilter = '';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
-function dateKey(d = new Date()) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+function getAppNow() {
+  if (typeof globalThis !== 'undefined' && globalThis.__testNowOverride) {
+    return new Date(globalThis.__testNowOverride);
+  }
+  return new Date();
+}
+
+// Chuẩn hóa thời gian theo múi giờ kinh doanh cố định Asia/Ho_Chi_Minh (UTC+7, không DST)
+function getVNParts(inputDate) {
+  const d = inputDate ? new Date(inputDate) : getAppNow();
+  try {
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: APP_TIMEZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+    const parts = {};
+    fmt.formatToParts(d).forEach(p => { if (p.type !== 'literal') parts[p.type] = p.value; });
+    const year = Number(parts.year);
+    const month = Number(parts.month);
+    const day = Number(parts.day);
+    const hour = Number(parts.hour) % 24;
+    const minute = Number(parts.minute);
+    const second = Number(parts.second);
+    if (year >= 2000 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return {
+        year, month, day, hour, minute, second,
+        dateStr: `${year}-${pad2(month)}-${pad2(day)}`,
+        timeStr: `${pad2(hour)}:${pad2(minute)}:${pad2(second)}`
+      };
+    }
+  } catch {}
+  // Fallback toán học chuẩn xác UTC+7 (Việt Nam không có giờ mùa hè DST)
+  const vnMs = d.getTime() + 7 * 60 * 60 * 1000;
+  const u = new Date(vnMs);
+  const year = u.getUTCFullYear();
+  const month = u.getUTCMonth() + 1;
+  const day = u.getUTCDate();
+  const hour = u.getUTCHours();
+  const minute = u.getUTCMinutes();
+  const second = u.getUTCSeconds();
+  return {
+    year, month, day, hour, minute, second,
+    dateStr: `${year}-${pad2(month)}-${pad2(day)}`,
+    timeStr: `${pad2(hour)}:${pad2(minute)}:${pad2(second)}`
+  };
+}
+
+function dateKey(d) {
+  if (d instanceof Date) {
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+  return getVNParts(d).dateStr;
 }
 
 function nowStamp(withSeconds = false) {
-  const d = new Date();
+  const p = getVNParts();
   const time = withSeconds
-    ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
-    : `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  return `${time} - ${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
+    ? `${pad2(p.hour)}:${pad2(p.minute)}:${pad2(p.second)}`
+    : `${pad2(p.hour)}:${pad2(p.minute)}`;
+  return `${time} - ${pad2(p.day)}/${pad2(p.month)}/${p.year}`;
 }
 
 function makeId() {
@@ -231,13 +297,15 @@ function loadDB() {
         extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
         packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
         logs: Array.isArray(d.logs) ? d.logs : [],
+        paymentRecords: Array.isArray(d.paymentRecords) ? d.paymentRecords : [],
+        businessPeriods: Array.isArray(d.businessPeriods) ? d.businessPeriods : [],
         deletedIds: (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {}
       };
     }
     const old = localStorage.getItem('linh-logistics-orders-v1');
     if (old) {
       const arr = JSON.parse(old);
-      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], extraShipments: [], packagingCatalog: samplePackagingCatalog(), logs: [], deletedIds: {} };
+      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], extraShipments: [], packagingCatalog: samplePackagingCatalog(), logs: [], paymentRecords: [], businessPeriods: [], deletedIds: {} };
     }
   } catch (err) {
     console.error('Lỗi đọc dữ liệu localStorage:', err);
@@ -262,6 +330,8 @@ function loadDB() {
     logs: [
       { id: 'l1', time: nowStamp(true), action: 'Khởi động', target: 'Hệ thống', detail: 'Sẵn sàng lưu trữ và tính toán tự động' }
     ],
+    paymentRecords: [],
+    businessPeriods: [],
     deletedIds: {}
   };
 }
@@ -269,6 +339,8 @@ function loadDB() {
 function persist(options = {}) {
   try {
     if (!db.deletedIds || typeof db.deletedIds !== 'object') db.deletedIds = {};
+    if (!Array.isArray(db.paymentRecords)) db.paymentRecords = [];
+    if (!Array.isArray(db.businessPeriods)) db.businessPeriods = [];
     const payload = JSON.stringify(db);
     localStorage.setItem(KEY, payload);
     const verify = localStorage.getItem(KEY);
@@ -566,16 +638,439 @@ function calcOrderMetrics(o) {
 }
 
 // ============================================================================
-// TỔNG HỢP DÒNG TIỀN & BÁO CÁO TÀI CHÍNH THEO NGÀY / THÁNG / NĂM
+// HỆ THỐNG CHỐT KỲ KINH DOANH NGÀY 26 HÀNG THÁNG (MÚI GIỜ ASIA/HO_CHI_MINH)
+// Chu kỳ: 26/M -> 25/(M+1) · Tự chốt lúc 00:00 ngày 26 · Không xóa dữ liệu gốc
 // ============================================================================
-function getActivePeriodPrefix() {
-  if (periodMode === 'day') return periodDate || dateKey();
-  if (periodMode === 'month') return periodMonth || dateKey().slice(0, 7);
-  if (periodMode === 'year') return periodYear || String(new Date().getFullYear());
-  return '';
+function normalizeDateStr(dStr) {
+  const s = String(dStr || '').trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
 }
 
-function getPeriodLabel() {
+function getBusinessPeriodForDate(dateStr) {
+  const clean = normalizeDateStr(dateStr) || getVNParts().dateStr;
+  const [y, m, d] = clean.split('-').map(Number);
+  let sy = y, sm = m, ey = y, em = m;
+  if (d >= BIZ_CLOSE_DAY) {
+    if (m === 12) { ey = y + 1; em = 1; } else { em = m + 1; }
+  } else {
+    if (m === 1) { sy = y - 1; sm = 12; } else { sm = m - 1; }
+  }
+  const startDate = `${sy}-${pad2(sm)}-${pad2(BIZ_CLOSE_DAY)}`;
+  const endDate = `${ey}-${pad2(em)}-${pad2(BIZ_CLOSE_DAY - 1)}`;
+  const id = `${startDate}_${endDate}`;
+  return {
+    id,
+    startDate,
+    endDate,
+    label: `Kỳ ${dateText(startDate)} – ${dateText(endDate)}`,
+    shortLabel: `${pad2(BIZ_CLOSE_DAY)}/${pad2(sm)} – ${pad2(BIZ_CLOSE_DAY - 1)}/${pad2(em)}/${ey}`
+  };
+}
+
+function getNextBusinessPeriod(p) {
+  const [ey, em] = p.endDate.split('-').map(Number);
+  return getBusinessPeriodForDate(`${ey}-${pad2(em)}-${pad2(BIZ_CLOSE_DAY)}`);
+}
+
+function getCurrentBusinessPeriod(nowInput) {
+  return getBusinessPeriodForDate(getVNParts(nowInput).dateStr);
+}
+
+function getOrderRecordedPaid(orderId, maxDate = '') {
+  if (!orderId) return 0;
+  return (db.paymentRecords || [])
+    .filter(p => p.kind === 'order' && p.orderId === orderId && (!maxDate || (normalizeDateStr(p.date) || '') <= maxDate))
+    .reduce((sum, p) => sum + Math.max(0, Math.round(parseNum(p.amount))), 0);
+}
+
+function getExtraRecordedPaid(extraShipId, maxDate = '') {
+  if (!extraShipId) return 0;
+  return (db.paymentRecords || [])
+    .filter(p => p.kind === 'extraship' && p.extraShipId === extraShipId && (!maxDate || (normalizeDateStr(p.date) || '') <= maxDate))
+    .reduce((sum, p) => sum + Math.max(0, Math.round(parseNum(p.amount))), 0);
+}
+
+function getOrderLegacyPaid(o) {
+  const totalNow = Math.round(parseNum(o.customerPaid));
+  const recordedAll = getOrderRecordedPaid(o.id);
+  return Math.max(0, totalNow - recordedAll);
+}
+
+function getExtraCurrentPaid(x) {
+  const amt = Math.round(parseNum(x.amount));
+  if (x.status === 'Đã thu') return amt;
+  if (x.status === 'Thu một phần') return Math.min(amt, Math.max(0, Math.round(parseNum(x.paidAmount))));
+  return 0;
+}
+
+function getExtraLegacyPaid(x) {
+  const currentPaid = getExtraCurrentPaid(x);
+  const recordedAll = getExtraRecordedPaid(x.id);
+  return Math.max(0, currentPaid - recordedAll);
+}
+
+function isExtraShipLinkedToOrder(x) {
+  return (db.orderNotes || []).some(o =>
+    o.status !== 'Đã hủy' && (
+      (o.id && x.orderId && x.orderId === o.id) ||
+      (o.code && x.orderCode && String(x.orderCode).trim().toLowerCase() === String(o.code).trim().toLowerCase())
+    )
+  );
+}
+
+// Tính công nợ khách hàng của 1 Note đơn tại thời điểm asOfDate (hoặc hiện tại nếu asOfDate rỗng)
+function calcOrderDebtAsOf(o, asOfDate = '') {
+  if (!o || o.status === 'Đã hủy') return 0;
+  if (!asOfDate) return calcOrderMetrics(o).customerDebt;
+  const oDate = normalizeDateStr(o.date);
+  if (oDate && oDate > asOfDate) return 0;
+
+  const m = calcOrderMetrics(o);
+  const linkedExtrasAsOf = (db.extraShipments || []).filter(x => {
+    const linked = (o.id && x.orderId && x.orderId === o.id) ||
+      (o.code && x.orderCode && String(x.orderCode).trim().toLowerCase() === String(o.code).trim().toLowerCase());
+    if (!linked) return false;
+    const xDate = normalizeDateStr(x.date) || oDate;
+    return !xDate || xDate <= asOfDate;
+  });
+  const extraTotalAsOf = linkedExtrasAsOf.reduce((s, x) => s + Math.round(parseNum(x.amount)), 0);
+  const extraPaidAsOf = linkedExtrasAsOf.reduce((s, x) => s + getExtraLegacyPaid(x) + getExtraRecordedPaid(x.id, asOfDate), 0);
+
+  const baseCollectWithoutExtra = Math.max(0, m.totalCollectCustomer - m.extraShipTotal);
+  const totalCollectAsOf = baseCollectWithoutExtra + extraTotalAsOf;
+  const orderPaidAsOf = getOrderLegacyPaid(o) + getOrderRecordedPaid(o.id, asOfDate);
+  const paidAsOf = Math.min(totalCollectAsOf, orderPaidAsOf + extraPaidAsOf);
+  return Math.max(0, totalCollectAsOf - paidAsOf);
+}
+
+function recordPaymentEvent({ kind, orderId = '', extraShipId = '', orderCode = '', customer = '', amount = 0, date = '', originDate = '', note = '' }) {
+  const amt = Math.round(parseNum(amount));
+  if (amt <= 0) return null;
+  if (!Array.isArray(db.paymentRecords)) db.paymentRecords = [];
+  const payDate = normalizeDateStr(date) || dateKey();
+  const origDate = normalizeDateStr(originDate) || payDate;
+  const originPeriod = getBusinessPeriodForDate(origDate);
+  const paymentPeriod = getBusinessPeriodForDate(payDate);
+  const rec = {
+    id: 'pay_' + makeId(),
+    kind: kind || 'order',
+    orderId,
+    extraShipId,
+    orderCode: String(orderCode || ''),
+    customer: String(customer || ''),
+    amount: amt,
+    date: payDate,
+    originDate: origDate,
+    originPeriodId: originPeriod.id,
+    paymentPeriodId: paymentPeriod.id,
+    isDebtRecovery: originPeriod.id !== paymentPeriod.id,
+    note: String(note || ''),
+    createdAt: nowStamp(true),
+    updatedAtMs: Date.now()
+  };
+  db.paymentRecords.unshift(rec);
+  return rec;
+}
+
+function reducePaymentEvents(kind, targetId, reduceAmt) {
+  let rem = Math.round(parseNum(reduceAmt));
+  if (rem <= 0 || !Array.isArray(db.paymentRecords)) return;
+  for (let i = 0; i < db.paymentRecords.length && rem > 0; i++) {
+    const p = db.paymentRecords[i];
+    const match = (kind === 'order' && p.kind === 'order' && p.orderId === targetId) ||
+      (kind === 'extraship' && p.kind === 'extraship' && p.extraShipId === targetId);
+    if (!match) continue;
+    const cur = Math.round(parseNum(p.amount));
+    if (cur <= rem) {
+      rem -= cur;
+      markDeletedId(p.id);
+      db.paymentRecords.splice(i, 1);
+      i--;
+    } else {
+      p.amount = cur - rem;
+      p.updatedAtMs = Date.now();
+      rem = 0;
+    }
+  }
+}
+
+function recordClosedPeriodAdjustment(recordDate, action, target, detail) {
+  const dStr = normalizeDateStr(recordDate);
+  if (!dStr || !Array.isArray(db.businessPeriods)) return;
+  const pInfo = getBusinessPeriodForDate(dStr);
+  const closedP = db.businessPeriods.find(p => p.id === pInfo.id && p.status === 'closed');
+  if (!closedP) return;
+  if (!Array.isArray(closedP.adjustments)) closedP.adjustments = [];
+  closedP.adjustments.unshift({
+    id: 'adj_' + makeId(),
+    time: nowStamp(true),
+    action: String(action || 'Điều chỉnh sau chốt kỳ'),
+    target: String(target || ''),
+    detail: String(detail || '')
+  });
+  closedP.adjustments = closedP.adjustments.slice(0, 100);
+  closedP.updatedAtMs = Date.now();
+  addAuditLog('Điều chỉnh kỳ đã chốt', closedP.label, `[${action}] ${target}: ${detail}`);
+}
+
+function computeBusinessPeriodSnapshot(periodInfo) {
+  const st = calcPeriodFinancials({
+    startDate: periodInfo.startDate,
+    endDate: periodInfo.endDate,
+    periodId: periodInfo.id,
+    asOfDate: periodInfo.endDate
+  });
+  const endingDebtItems = [];
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy').forEach(o => {
+    const oDate = normalizeDateStr(o.date);
+    if (oDate && oDate > periodInfo.endDate) return;
+    const debtAtClose = calcOrderDebtAsOf(o, periodInfo.endDate);
+    if (debtAtClose > 0) {
+      endingDebtItems.push({
+        orderId: o.id,
+        orderCode: o.code || '',
+        customer: o.customer || '',
+        phone: o.phone || '',
+        product: o.product || o.goodsType || '',
+        orderDate: oDate,
+        originPeriodId: getBusinessPeriodForDate(oDate || periodInfo.startDate).id,
+        debtAtClose
+      });
+    }
+  });
+  (db.extraShipments || []).forEach(x => {
+    if (isExtraShipLinkedToOrder(x)) return;
+    const xDate = normalizeDateStr(x.date);
+    if (xDate && xDate > periodInfo.endDate) return;
+    const unpaid = Math.max(0, Math.round(parseNum(x.amount)) - (getExtraLegacyPaid(x) + getExtraRecordedPaid(x.id, periodInfo.endDate)));
+    if (unpaid > 0) {
+      endingDebtItems.push({
+        orderId: '',
+        extraShipId: x.id,
+        orderCode: x.orderCode || '',
+        customer: x.customer || '',
+        phone: '',
+        product: `Cước ship PS: ${x.content || ''}`,
+        orderDate: xDate,
+        originPeriodId: getBusinessPeriodForDate(xDate || periodInfo.startDate).id,
+        debtAtClose: unpaid
+      });
+    }
+  });
+  return {
+    orderCount: st.orderCount,
+    shipmentCount: st.shipmentCount,
+    purchaseCount: st.purchaseCount,
+    totalTrafficOrders: st.totalTrafficOrders,
+    txCount: st.txCount,
+    netProfit: st.netProfit,
+    shipCostTotal: st.shipCostTotal,
+    shipChargeTotal: st.shipChargeTotal,
+    shipProfitTotal: st.shipProfitTotal,
+    packCostTotal: st.packCostTotal,
+    packChargeTotal: st.packChargeTotal,
+    packProfitTotal: st.packProfitTotal,
+    totalServiceRevenue: st.totalServiceRevenue,
+    fxProfitTotal: st.fxProfitTotal,
+    txOtherIn: st.txOtherIn,
+    totalIncidentalExpense: st.totalIncidentalExpense,
+    totalCollectedFromCustomer: st.totalCollectedFromCustomer,
+    periodDirectCollected: st.periodDirectCollected,
+    debtRecoveryIn: st.debtRecoveryIn,
+    totalBilledCustomer: st.totalBilledCustomer,
+    totalTransferredOut: st.totalTransferredOut,
+    txIn: st.txIn,
+    txOut: st.txOut,
+    periodNewCustomerDebt: st.periodNewCustomerDebt,
+    endingCustomerDebt: st.allCustomerDebt,
+    endingWarehouseDebt: st.allWarehouseUnpaid,
+    endingDebtItems
+  };
+}
+
+// Tự động đối chiếu và chốt các kỳ kinh doanh đã qua 00:00 ngày 26 (Asia/Ho_Chi_Minh)
+// Hoạt động kể cả khi ứng dụng không được mở lúc 00:00 ngày 26 (idempotent, không tạo trùng kỳ)
+function reconcileBusinessPeriods(nowInput, opts = {}) {
+  if (!Array.isArray(db.businessPeriods)) db.businessPeriods = [];
+  if (!Array.isArray(db.paymentRecords)) db.paymentRecords = [];
+  const curP = getCurrentBusinessPeriod(nowInput);
+  const periodMap = new Map();
+  db.businessPeriods.forEach(p => { if (p && p.id) periodMap.set(p.id, p); });
+
+  // Thu thập tất cả kỳ có dữ liệu phát sinh trước hoặc trong kỳ hiện tại
+  const discoveredIds = new Set(periodMap.keys());
+  const collectDate = dStr => {
+    const clean = normalizeDateStr(dStr);
+    if (!clean || clean > curP.endDate) return;
+    discoveredIds.add(getBusinessPeriodForDate(clean).id);
+  };
+  (db.orderNotes || []).forEach(o => collectDate(o.date));
+  (db.shipments || []).forEach(s => collectDate(s.date));
+  (db.purchases || []).forEach(p => collectDate(p.date));
+  (db.transactions || []).forEach(t => collectDate(t.date));
+  (db.extraShipments || []).forEach(x => collectDate(x.date));
+  (db.paymentRecords || []).forEach(p => collectDate(p.date));
+  discoveredIds.add(curP.id);
+
+  let changed = false;
+  const newlyClosed = [];
+
+  discoveredIds.forEach(pid => {
+    const [startDate, endDate] = pid.split('_');
+    if (!normalizeDateStr(startDate) || !normalizeDateStr(endDate)) return;
+    const pInfo = getBusinessPeriodForDate(startDate);
+    const existing = periodMap.get(pid);
+
+    if (pInfo.endDate < curP.startDate) {
+      // Kỳ đã kết thúc qua 00:00 ngày 26 -> tự động chốt và bảo toàn snapshot cuối kỳ
+      if (!existing || existing.status !== 'closed' || !existing.snapshot) {
+        const nextP = getNextBusinessPeriod(pInfo);
+        const snap = computeBusinessPeriodSnapshot(pInfo);
+        const closedObj = {
+          id: pInfo.id,
+          label: pInfo.label,
+          shortLabel: pInfo.shortLabel,
+          startDate: pInfo.startDate,
+          endDate: pInfo.endDate,
+          status: 'closed',
+          closedAt: `00:00:00 - ${dateText(nextP.startDate)} (${APP_TIMEZONE})`,
+          closedAtMs: Date.now(),
+          snapshot: snap,
+          adjustments: Array.isArray(existing?.adjustments) ? existing.adjustments : [],
+          updatedAtMs: Date.now()
+        };
+        periodMap.set(pInfo.id, closedObj);
+        newlyClosed.push(pInfo.label);
+        changed = true;
+      }
+    } else if (pInfo.id === curP.id) {
+      if (!existing || existing.status !== 'active') {
+        periodMap.set(curP.id, {
+          id: curP.id,
+          label: curP.label,
+          shortLabel: curP.shortLabel,
+          startDate: curP.startDate,
+          endDate: curP.endDate,
+          status: 'active',
+          closedAt: '',
+          closedAtMs: 0,
+          snapshot: null,
+          adjustments: Array.isArray(existing?.adjustments) ? existing.adjustments : [],
+          updatedAtMs: Date.now()
+        });
+        changed = true;
+      }
+    }
+  });
+
+  db.businessPeriods = [...periodMap.values()].sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+
+  const periodRolledOver = Boolean(lastActiveBizPeriodId && lastActiveBizPeriodId !== curP.id);
+  const wasViewingOldActive = !selectedBusinessPeriodId || selectedBusinessPeriodId === lastActiveBizPeriodId;
+  if (wasViewingOldActive || !periodMap.has(selectedBusinessPeriodId)) {
+    selectedBusinessPeriodId = curP.id;
+  }
+  lastActiveBizPeriodId = curP.id;
+
+  if (newlyClosed.length > 0 && !opts.silent) {
+    if (typeof saveAutoSnapshot === 'function') {
+      saveAutoSnapshot(`Tự động chốt kỳ ${newlyClosed.join(', ')}`, true);
+    }
+    addAuditLog('Tự động chốt kỳ 26', newlyClosed.join(', '), `Đã tự động chốt kỳ lúc 00:00 ngày 26 (${APP_TIMEZONE}) và mở ${curP.label} từ 0.`);
+  }
+  if (changed && !opts.skipPersist) {
+    persist({ skipSnapshot: true });
+  }
+  return { currentPeriod: curP, newlyClosed, periodRolledOver, changed };
+}
+
+function getSelectedBusinessPeriod() {
+  const curP = getCurrentBusinessPeriod();
+  const list = Array.isArray(db.businessPeriods) ? db.businessPeriods : [];
+  const found = list.find(p => p.id === selectedBusinessPeriodId) || list.find(p => p.id === curP.id);
+  if (found) return found;
+  return { ...curP, status: 'active', closedAt: '', snapshot: null, adjustments: [] };
+}
+
+function selectBusinessPeriod(periodId) {
+  selectedBusinessPeriodId = periodId || getCurrentBusinessPeriod().id;
+  periodMode = 'bizperiod';
+  render();
+}
+
+function openBusinessPeriodOnDashboard(periodId) {
+  selectedBusinessPeriodId = periodId || getCurrentBusinessPeriod().id;
+  periodMode = 'bizperiod';
+  view = 'overview';
+  document.querySelectorAll('.nav').forEach(n => n.classList.toggle('active', n.dataset.view === 'overview'));
+  render();
+}
+
+function startPeriodCloseWatcher() {
+  if (periodWatcherTimer) clearInterval(periodWatcherTimer);
+  periodWatcherTimer = setInterval(() => {
+    const res = reconcileBusinessPeriods();
+    if (res.newlyClosed.length > 0 || res.periodRolledOver) {
+      render();
+      toast(`📅 Đã tự động chốt kỳ và bắt đầu ${res.currentPeriod.label} từ 0!`);
+    }
+  }, 30000);
+}
+
+// ============================================================================
+// TỔNG HỢP DÒNG TIỀN & BÁO CÁO TÀI CHÍNH THEO KỲ NGÀY 26 / NGÀY / THÁNG / NĂM
+// ============================================================================
+function getActivePeriodFilter() {
+  if (periodMode === 'bizperiod') {
+    const bp = getSelectedBusinessPeriod();
+    return {
+      mode: 'bizperiod',
+      periodId: bp.id,
+      startDate: bp.startDate,
+      endDate: bp.endDate,
+      status: bp.status,
+      asOfDate: bp.status === 'closed' ? bp.endDate : '',
+      periodObj: bp
+    };
+  }
+  if (periodMode === 'day') {
+    const d = periodDate || dateKey();
+    return { mode: 'day', prefix: d, startDate: d, endDate: d, periodId: '', asOfDate: '' };
+  }
+  if (periodMode === 'month') {
+    const m = periodMonth || dateKey().slice(0, 7);
+    return { mode: 'month', prefix: m, startDate: '', endDate: '', periodId: '', asOfDate: '' };
+  }
+  if (periodMode === 'year') {
+    const y = periodYear || String(getVNParts().year);
+    return { mode: 'year', prefix: y, startDate: '', endDate: '', periodId: '', asOfDate: '' };
+  }
+  return { mode: 'all', prefix: '', startDate: '', endDate: '', periodId: '', asOfDate: '' };
+}
+
+function getActivePeriodPrefix() {
+  return getActivePeriodFilter();
+}
+
+function matchesDateFilter(dStr, filterSpec) {
+  if (!filterSpec) return true;
+  const clean = normalizeDateStr(dStr);
+  if (typeof filterSpec === 'string') {
+    if (!filterSpec) return true;
+    return clean.startsWith(filterSpec);
+  }
+  if (filterSpec.startDate && filterSpec.endDate) {
+    return Boolean(clean && clean >= filterSpec.startDate && clean <= filterSpec.endDate);
+  }
+  if (filterSpec.prefix) {
+    return clean.startsWith(filterSpec.prefix);
+  }
+  return true;
+}
+
+function getPeriodLabel(filterSpec = null) {
+  if (filterSpec && filterSpec.periodObj) return filterSpec.periodObj.label;
+  if (periodMode === 'bizperiod') return getSelectedBusinessPeriod().label;
   if (periodMode === 'day') return `Ngày ${dateText(periodDate)}`;
   if (periodMode === 'month') {
     const [y, m] = (periodMonth || dateKey().slice(0, 7)).split('-');
@@ -585,13 +1080,21 @@ function getPeriodLabel() {
   return 'Toàn bộ thời gian';
 }
 
-function calcPeriodFinancials(prefix = '') {
-  const matchDate = d => !prefix || String(d || '').startsWith(prefix);
+function calcPeriodFinancials(filterSpec = '') {
+  const isObj = filterSpec && typeof filterSpec === 'object';
+  const periodId = isObj ? (filterSpec.periodId || '') : '';
+  const asOfDate = isObj ? (filterSpec.asOfDate || '') : '';
+  const matchDate = d => matchesDateFilter(d, filterSpec);
+
   const orders = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchDate(o.date));
+  const shipmentsInPeriod = (db.shipments || []).filter(s => matchDate(s.date));
+  const purchasesInPeriod = (db.purchases || []).filter(p => matchDate(p.date));
+  const extraShipsInPeriod = (db.extraShipments || []).filter(x => matchDate(x.date));
   const txs = (db.transactions || []).filter(x => matchDate(x.date));
+  const paymentsInPeriod = (db.paymentRecords || []).filter(p => matchDate(p.date));
 
   let orderBilledCustomer = 0;
-  let orderCollectedCustomer = 0;
+  let legacyOrderCollected = 0;
   let orderActualOut = 0;
   let orderCommittedOut = 0;
   let shipCostTotal = 0;
@@ -603,13 +1106,15 @@ function calcPeriodFinancials(prefix = '') {
   let orderServiceFeeTotal = 0;
   let fxProfitTotal = 0;
   let orderExtraCostTotal = 0;
+  let periodNewCustomerDebt = 0;
 
   orders.forEach(o => {
     const m = calcOrderMetrics(o);
     orderBilledCustomer += m.totalCollectCustomer;
-    orderCollectedCustomer += m.customerPaid;
+    legacyOrderCollected += getOrderLegacyPaid(o);
     orderCommittedOut += m.totalPayout;
-    orderActualOut += ((o.includeGoodsInFlow && o.partnerPaid) ? m.baseGoodsCostVnd : 0) + (o.warehousePaid ? m.shipCost : 0) + m.packCost + m.extraCost;
+    const whPaidInThisPeriod = o.warehousePaid && (!o.warehousePaidDate || matchDate(o.warehousePaidDate));
+    orderActualOut += ((o.includeGoodsInFlow && o.partnerPaid) ? m.baseGoodsCostVnd : 0) + (whPaidInThisPeriod ? m.shipCost : 0) + m.packCost + m.extraCost;
     shipCostTotal += m.shipCost;
     shipChargeTotal += m.shipCharge;
     shipProfitTotal += m.shipProfit;
@@ -619,6 +1124,22 @@ function calcPeriodFinancials(prefix = '') {
     orderServiceFeeTotal += m.serviceFee;
     fxProfitTotal += m.fxProfit;
     orderExtraCostTotal += m.extraCost;
+    periodNewCustomerDebt += calcOrderDebtAsOf(o, asOfDate);
+  });
+
+  // Cộng tiền trả cước kho của đơn kỳ trước nếu thực trả vào kỳ này
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && !matchDate(o.date) && o.warehousePaid && o.warehousePaidDate && matchDate(o.warehousePaidDate)).forEach(o => {
+    orderActualOut += calcOrderMetrics(o).shipCost;
+  });
+
+  // Cước ship phát sinh (legacy paid + công nợ phát sinh của cước ship không gắn đơn)
+  let legacyExtraCollected = 0;
+  extraShipsInPeriod.forEach(x => {
+    legacyExtraCollected += getExtraLegacyPaid(x);
+    if (!isExtraShipLinkedToOrder(x)) {
+      const paidAsOf = getExtraLegacyPaid(x) + getExtraRecordedPaid(x.id, asOfDate);
+      periodNewCustomerDebt += Math.max(0, Math.round(parseNum(x.amount)) - paidAsOf);
+    }
   });
 
   (db.packagingCatalog || []).filter(item => matchDate(item.date)).forEach(item => {
@@ -630,37 +1151,77 @@ function calcPeriodFinancials(prefix = '') {
     packProfitTotal += (r - c);
   });
 
+  // Ghi nhận dòng tiền thực thu từ paymentRecords theo ĐÚNG NGÀY KHÁCH THANH TOÁN (kể cả thu công nợ kỳ trước)
+  let recordedPaymentIn = 0;
+  let debtRecoveryIn = 0;
+  paymentsInPeriod.forEach(p => {
+    const amt = Math.max(0, Math.round(parseNum(p.amount)));
+    recordedPaymentIn += amt;
+    if (periodId ? (p.originPeriodId && p.originPeriodId !== periodId) : Boolean(p.isDebtRecovery)) {
+      debtRecoveryIn += amt;
+    }
+  });
+
+  const nonProfitInCategories = ['Phí dịch vụ', 'Phí mua hộ', 'Đóng gói', 'Thu hộ', 'Thu công nợ', 'Thu công nợ kỳ trước'];
   const txIn = txs.filter(x => x.type === 'Thu').reduce((a, x) => a + parseNum(x.amount), 0);
   const txOut = txs.filter(x => x.type === 'Chi').reduce((a, x) => a + parseNum(x.amount), 0);
   const txServiceIn = txs.filter(x => x.type === 'Thu' && ['Phí dịch vụ', 'Phí mua hộ'].includes(x.category)).reduce((a, x) => a + parseNum(x.amount), 0);
   const txPackIn = txs.filter(x => x.type === 'Thu' && x.category === 'Đóng gói').reduce((a, x) => a + parseNum(x.amount), 0);
-  const txOtherIn = txs.filter(x => x.type === 'Thu' && !['Phí dịch vụ', 'Phí mua hộ', 'Đóng gói'].includes(x.category)).reduce((a, x) => a + parseNum(x.amount), 0);
+  const txPassThroughIn = txs.filter(x => x.type === 'Thu' && ['Thu hộ', 'Thu công nợ', 'Thu công nợ kỳ trước'].includes(x.category)).reduce((a, x) => a + parseNum(x.amount), 0);
+  const txOtherIn = txs.filter(x => x.type === 'Thu' && !nonProfitInCategories.includes(x.category)).reduce((a, x) => a + parseNum(x.amount), 0);
 
+  // Tổng công nợ thực tế còn phải thu (BẢO TOÀN XUYÊN KỲ — không bao giờ reset về 0 khi chốt kỳ)
   let allCustomerDebt = 0;
   let allWarehouseUnpaid = 0;
   let allPartnerUnpaid = 0;
   (db.orderNotes || []).filter(o => o.status !== 'Đã hủy').forEach(o => {
+    const oDate = normalizeDateStr(o.date);
+    if (asOfDate && oDate && oDate > asOfDate) return;
+    allCustomerDebt += calcOrderDebtAsOf(o, asOfDate);
     const m = calcOrderMetrics(o);
-    allCustomerDebt += m.customerDebt;
-    allWarehouseUnpaid += m.warehouseDebt;
+    const whUnpaidAsOf = asOfDate
+      ? (!o.warehousePaid || (o.warehousePaidDate && o.warehousePaidDate > asOfDate))
+      : !o.warehousePaid;
+    allWarehouseUnpaid += whUnpaidAsOf ? m.shipCost : 0;
     allPartnerUnpaid += m.partnerDebt;
   });
+  (db.extraShipments || []).forEach(x => {
+    if (isExtraShipLinkedToOrder(x)) return;
+    const xDate = normalizeDateStr(x.date);
+    if (asOfDate && xDate && xDate > asOfDate) return;
+    const paidAsOf = asOfDate
+      ? (getExtraLegacyPaid(x) + getExtraRecordedPaid(x.id, asOfDate))
+      : getExtraCurrentPaid(x);
+    allCustomerDebt += Math.max(0, Math.round(parseNum(x.amount)) - paidAsOf);
+  });
 
-  const totalCollectedFromCustomer = orderCollectedCustomer + txIn;
+  const periodDirectCollected = legacyOrderCollected + legacyExtraCollected + Math.max(0, recordedPaymentIn - debtRecoveryIn);
+  const totalCollectedFromCustomer = legacyOrderCollected + legacyExtraCollected + recordedPaymentIn + txIn;
   const totalBilledCustomer = orderBilledCustomer + txIn;
   const totalTransferredOut = orderActualOut + txOut;
   const totalServiceRevenue = orderServiceFeeTotal + txServiceIn;
   const totalPackProfit = packProfitTotal + txPackIn;
   const totalIncidentalExpense = orderExtraCostTotal + txOut;
+  // Lợi nhuận thực tế giữ nguyên công thức: KHÔNG biến tiền thu công nợ kỳ cũ / thu hộ thành lợi nhuận mới
   const netProfit = shipProfitTotal + totalServiceRevenue + fxProfitTotal + totalPackProfit + txOtherIn - totalIncidentalExpense;
 
   return {
     orderCount: orders.length,
+    shipmentCount: shipmentsInPeriod.length,
+    purchaseCount: purchasesInPeriod.length,
+    totalTrafficOrders: orders.length + shipmentsInPeriod.length + purchasesInPeriod.length,
     txCount: txs.length,
+    paymentCount: paymentsInPeriod.length,
+    txIn,
+    txOut,
+    txPassThroughIn,
+    periodDirectCollected,
+    debtRecoveryIn,
     totalCollectedFromCustomer,
     totalBilledCustomer,
     totalTransferredOut,
     orderCommittedOut: orderCommittedOut + txOut,
+    periodNewCustomerDebt,
     allWarehouseUnpaid,
     allCustomerDebt,
     allPartnerUnpaid,
@@ -681,17 +1242,34 @@ function calcPeriodFinancials(prefix = '') {
 // ============================================================================
 // BIỂU ĐỒ MÀU SẮC TRỰC QUAN (COREUI & CREATIVE TIM DASHBOARD WIDGETS)
 // ============================================================================
-function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingCount) {
+function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingCount, periodObj = null, filterSpec = null) {
   const hideProfit = currentUserRole === 'warehouse';
-  const packCount = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && (parseNum(o.packCharge) > 0 || (o.packagingType && o.packagingType !== 'Tiêu chuẩn (Miễn phí)'))).length;
+  const isClosedView = Boolean(periodObj && periodObj.status === 'closed' && periodObj.snapshot);
+  const packCount = (db.orderNotes || []).filter(o =>
+    o.status !== 'Đã hủy' &&
+    matchesDateFilter(o.date, filterSpec) &&
+    (parseNum(o.packCharge) > 0 || (o.packagingType && o.packagingType !== 'Tiêu chuẩn (Miễn phí)'))
+  ).length;
+
+  const debtMainVal = isClosedView ? periodObj.snapshot.endingCustomerDebt : allStats.allCustomerDebt;
+  const debtMainLabel = isClosedView
+    ? `Công nợ chốt cuối kỳ (${dateText(periodObj.endDate)})`
+    : 'Tổng công nợ còn phải thu (Thực tế)';
+  const debtSubText = isClosedView
+    ? `Phát sinh trong kỳ: ${money(periodObj.snapshot.periodNewCustomerDebt)} ₫ · Nợ thực tế hiện tại: ${money(allStats.allCustomerDebt)} ₫`
+    : `Phát sinh mới kỳ này: ${money(chartStats.periodNewCustomerDebt)} ₫ · ${allStats.allWarehouseUnpaid > 0 ? `Nợ kho: ${money(allStats.allWarehouseUnpaid)} ₫` : '✓ Đủ cước kho'}`;
+
+  const cashSubText = chartStats.debtRecoveryIn > 0
+    ? `Thu nợ kỳ trước: +${shortMoney(chartStats.debtRecoveryIn)} ₫ · Chi/Chuyển ra: −${shortMoney(chartStats.totalTransferredOut)} ₫`
+    : `Phát sinh phải thu: ${shortMoney(chartStats.totalBilledCustomer)} ₫ · Chi/Chuyển ra: −${shortMoney(chartStats.totalTransferredOut)} ₫`;
 
   return `<div class="coreui-kpi-grid">
     <div class="coreui-widget w-blue" onclick="${hideProfit ? "setView('orders',document.querySelector('[data-view=orders]'))" : "openFinanceSubtab('report')"}">
       <div class="widget-top">
         <div>
-          <div class="widget-val">${hideProfit ? `${(db.orderNotes || []).length} Note đơn` : `${chartStats.netProfit >= 0 ? '+' : ''}${money(chartStats.netProfit)} ₫`}</div>
-          <div class="widget-label">${hideProfit ? 'Tổng đơn vận hành' : `Lợi nhuận thực tế (${esc(chartPeriodLabel)})`}</div>
-          <div class="widget-sub">${hideProfit ? `Đóng gói kỹ: ${packCount} đơn` : `Cước +${shortMoney(chartStats.shipProfitTotal)} · DV +${shortMoney(chartStats.totalServiceRevenue)} · ĐG +${shortMoney(chartStats.packProfitTotal || 0)}`}</div>
+          <div class="widget-val">${hideProfit ? `${chartStats.orderCount} Note đơn` : `${chartStats.netProfit > 0 ? '+' : ''}${money(chartStats.netProfit)} ₫`}</div>
+          <div class="widget-label">${hideProfit ? `Note đơn (${esc(chartPeriodLabel)})` : `Lợi nhuận thực tế (${esc(chartPeriodLabel)})`}</div>
+          <div class="widget-sub">${hideProfit ? `Đóng gói kỹ trong kỳ: ${packCount} đơn` : `Cước +${shortMoney(chartStats.shipProfitTotal)} · DV +${shortMoney(chartStats.totalServiceRevenue)} · ĐG +${shortMoney(chartStats.packProfitTotal || 0)} · Tệ +${shortMoney(chartStats.fxProfitTotal)}`}</div>
         </div>
         <span class="widget-gear" aria-hidden="true">⚙ ▾</span>
       </div>
@@ -710,9 +1288,9 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
     <div class="coreui-widget w-cyan" onclick="openFinanceSubtab('cashflow')">
       <div class="widget-top">
         <div>
-          <div class="widget-val">${hideProfit ? `${(db.shipments || []).length} Ký gửi` : `${money(chartStats.totalCollectedFromCustomer)} ₫`}</div>
-          <div class="widget-label">${hideProfit ? 'Đơn ký gửi kho TQ - VN' : `Đã thu từ khách (${esc(chartPeriodLabel)})`}</div>
-          <div class="widget-sub">${hideProfit ? 'Bấm để quản lý mã vận đơn' : `Phát sinh phải thu: ${money(chartStats.totalBilledCustomer)} ₫`}</div>
+          <div class="widget-val">${hideProfit ? `${chartStats.shipmentCount} Ký gửi` : `${money(chartStats.totalCollectedFromCustomer)} ₫`}</div>
+          <div class="widget-label">${hideProfit ? `Đơn ký gửi (${esc(chartPeriodLabel)})` : `Tổng tiền thu trong kỳ (${esc(chartPeriodLabel)})`}</div>
+          <div class="widget-sub">${hideProfit ? 'Bấm để quản lý mã vận đơn' : cashSubText}</div>
         </div>
         <span class="widget-gear" aria-hidden="true">📍</span>
       </div>
@@ -730,9 +1308,9 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
     <div class="coreui-widget w-amber" onclick="openFinanceSubtab('debts')">
       <div class="widget-top">
         <div>
-          <div class="widget-val">${money(allStats.allCustomerDebt)} ₫</div>
-          <div class="widget-label">Khách còn nợ chưa thu</div>
-          <div class="widget-sub">${allStats.allWarehouseUnpaid > 0 ? `Cước kho chưa trả: ${money(allStats.allWarehouseUnpaid)} ₫` : '✓ Đã thanh toán hết cước kho'}</div>
+          <div class="widget-val">${money(debtMainVal)} ₫</div>
+          <div class="widget-label">${esc(debtMainLabel)}</div>
+          <div class="widget-sub">${esc(debtSubText)}</div>
         </div>
         <span class="widget-gear" aria-hidden="true">⚙ ▾</span>
       </div>
@@ -742,12 +1320,12 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
       </svg>
     </div>
 
-    <div class="coreui-widget w-red" onclick="setView('shipments',document.querySelector('[data-view=shipments]'))">
+    <div class="coreui-widget w-red" onclick="setView('orders',document.querySelector('[data-view=orders]'))">
       <div class="widget-top">
         <div>
-          <div class="widget-val">${allPendingCount} mục · ${(db.shipments || []).length} VĐ</div>
-          <div class="widget-label">Đơn ký gửi & Việc cần xử lý</div>
-          <div class="widget-sub">${(db.orderNotes || []).length} Note đơn · ${packCount} Đóng gói · ${(db.purchases || []).length} Mua hộ</div>
+          <div class="widget-val">${chartStats.totalTrafficOrders} đơn</div>
+          <div class="widget-label">Lưu lượng đơn hàng (${esc(chartPeriodLabel)})</div>
+          <div class="widget-sub">${chartStats.orderCount} Note đơn · ${chartStats.shipmentCount} Ký gửi · ${chartStats.purchaseCount} Mua hộ · (${allPendingCount} việc đang mở)</div>
         </div>
         <span class="widget-gear" aria-hidden="true">⚙ ▾</span>
       </div>
@@ -758,53 +1336,68 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
   </div>`;
 }
 
-function renderTrafficChartCard(s, periodLabel) {
+function renderTrafficChartCard(s, periodLabel, filterSpec = null) {
+  const activeFilter = filterSpec || getActivePeriodFilter();
   const bucketMap = new Map();
-  const prefix = getActivePeriodPrefix();
-  const useMonthly = periodMode === 'year';
+  const useMonthly = activeFilter.mode === 'year';
+  const matchDate = d => matchesDateFilter(d, activeFilter);
 
   const getKey = d => {
-    const raw = d || dateKey();
+    const raw = normalizeDateStr(d) || dateKey();
     return useMonthly ? raw.slice(0, 7) : raw;
   };
   const ensure = k => {
-    if (!bucketMap.has(k)) bucketMap.set(k, { key: k, moneyIn: 0, moneyOut: 0, profit: 0 });
+    if (!bucketMap.has(k)) bucketMap.set(k, { key: k, moneyIn: 0, moneyOut: 0, profit: 0, orders: 0 });
     return bucketMap.get(k);
   };
 
-  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy').forEach(o => {
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchDate(o.date)).forEach(o => {
     const b = ensure(getKey(o.date));
     const m = calcOrderMetrics(o);
-    b.moneyIn += m.customerPaid + m.shipCharge;
-    b.moneyOut += ((o.includeGoodsInFlow && o.partnerPaid) ? m.baseGoodsCostVnd : 0) + (o.warehousePaid ? m.shipCost : 0) + m.packCost + m.extraCost;
+    b.orders += 1;
+    b.moneyIn += getOrderLegacyPaid(o);
+    const whPaidSame = o.warehousePaid && (!o.warehousePaidDate || matchDate(o.warehousePaidDate));
+    b.moneyOut += ((o.includeGoodsInFlow && o.partnerPaid) ? m.baseGoodsCostVnd : 0) + (whPaidSame ? m.shipCost : 0) + m.packCost + m.extraCost;
     b.profit += m.netProfit;
   });
 
-  (db.transactions || []).forEach(x => {
+  (db.shipments || []).filter(sh => matchDate(sh.date)).forEach(sh => {
+    ensure(getKey(sh.date)).orders += 1;
+  });
+
+  (db.purchases || []).filter(pu => matchDate(pu.date)).forEach(pu => {
+    ensure(getKey(pu.date)).orders += 1;
+  });
+
+  (db.extraShipments || []).filter(x => matchDate(x.date)).forEach(x => {
+    const lp = getExtraLegacyPaid(x);
+    if (lp > 0) ensure(getKey(x.date)).moneyIn += lp;
+  });
+
+  // Cộng tiền khách thanh toán (kể cả công nợ kỳ cũ) vào đúng ngày thực thu — KHÔNG cộng trùng lợi nhuận
+  (db.paymentRecords || []).filter(p => matchDate(p.date)).forEach(p => {
+    const amt = Math.max(0, Math.round(parseNum(p.amount)));
+    if (amt > 0) ensure(getKey(p.date)).moneyIn += amt;
+  });
+
+  const nonProfitCats = ['Thu hộ', 'Thu công nợ', 'Thu công nợ kỳ trước'];
+  (db.transactions || []).filter(x => matchDate(x.date)).forEach(x => {
     const b = ensure(getKey(x.date));
     const amt = parseNum(x.amount);
     if (x.type === 'Thu') {
       b.moneyIn += amt;
-      b.profit += amt;
+      if (!nonProfitCats.includes(x.category)) b.profit += amt;
     } else {
       b.moneyOut += amt;
       b.profit -= amt;
     }
   });
 
-  let pts = [...bucketMap.values()].sort((a, b) => a.key.localeCompare(b.key)).slice(-8);
-  if (pts.length < 3) {
-    const base = pts[0] || { key: dateKey(), moneyIn: 1800000, moneyOut: 950000, profit: 650000 };
-    pts = [
-      { key: 'Kỳ 1', moneyIn: Math.round(base.moneyIn * 0.55), moneyOut: Math.round(base.moneyOut * 0.6), profit: Math.round(base.profit * 0.5) },
-      { key: 'Kỳ 2', moneyIn: Math.round(base.moneyIn * 0.85), moneyOut: Math.round(base.moneyOut * 0.7), profit: Math.round(base.profit * 0.8) },
-      { key: 'Kỳ 3', moneyIn: Math.round(base.moneyIn * 0.68), moneyOut: Math.round(base.moneyOut * 0.65), profit: Math.round(base.profit * 0.72) },
-      { key: 'Kỳ 4', moneyIn: Math.round(base.moneyIn * 0.92), moneyOut: Math.round(base.moneyOut * 0.75), profit: Math.round(base.profit * 0.9) },
-      ...pts
-    ];
-  }
+  // Tuyệt đối không tạo dữ liệu giả: chỉ hiển thị điểm dữ liệu thật trong kỳ
+  const pts = [...bucketMap.values()].sort((a, b) => a.key.localeCompare(b.key)).slice(-12);
+  const hasRealPoints = pts.length > 0;
 
-  const maxV = Math.max(500000, ...pts.flatMap(p => [p.moneyIn, p.moneyOut, Math.abs(p.profit)]));
+  const maxV = hasRealPoints ? Math.max(100000, ...pts.flatMap(p => [p.moneyIn, p.moneyOut, Math.abs(p.profit)])) : 100000;
   const W = 760;
   const H = 195;
   const padL = 48;
@@ -819,7 +1412,7 @@ function renderTrafficChartCard(s, periodLabel) {
 
   const smoothPath = arr => {
     if (!arr.length) return '';
-    if (arr.length === 1) return `M ${arr[0].x} ${arr[0].y}`;
+    if (arr.length === 1) return `M ${arr[0].x.toFixed(1)} ${arr[0].y.toFixed(1)}`;
     let d = `M ${arr[0].x.toFixed(1)} ${arr[0].y.toFixed(1)}`;
     for (let i = 0; i < arr.length - 1; i++) {
       const p0 = arr[i];
@@ -830,41 +1423,44 @@ function renderTrafficChartCard(s, periodLabel) {
     return d;
   };
 
-  const inCoords = pts.map((p, i) => ({ x: toX(i), y: toY(p.moneyIn), lbl: shortDateLabel(p.key), v: p.moneyIn }));
+  const inCoords = pts.map((p, i) => ({ x: toX(i), y: toY(p.moneyIn), lbl: shortDateLabel(p.key), v: p.moneyIn, orders: p.orders }));
   const profCoords = pts.map((p, i) => ({ x: toX(i), y: toY(Math.max(0, p.profit)), v: p.profit }));
   const outCoords = pts.map((p, i) => ({ x: toX(i), y: toY(p.moneyOut), v: p.moneyOut }));
 
   const inLine = smoothPath(inCoords);
-  const inArea = `${inLine} L ${inCoords[inCoords.length - 1].x.toFixed(1)} ${(padT + plotH).toFixed(1)} L ${inCoords[0].x.toFixed(1)} ${(padT + plotH).toFixed(1)} Z`;
+  const inArea = inCoords.length >= 2
+    ? `${inLine} L ${inCoords[inCoords.length - 1].x.toFixed(1)} ${(padT + plotH).toFixed(1)} L ${inCoords[0].x.toFixed(1)} ${(padT + plotH).toFixed(1)} Z`
+    : '';
   const profLine = smoothPath(profCoords);
   const outLine = smoothPath(outCoords);
 
-  const posSum = Math.max(1, Math.max(0, s.shipProfitTotal) + Math.max(0, s.totalServiceRevenue) + Math.max(0, s.packProfitTotal || 0) + Math.max(0, s.fxProfitTotal));
-  const pctShip = Math.min(100, Math.max(12, Math.round((Math.max(0, s.shipProfitTotal) / posSum) * 100)));
-  const pctFee = Math.min(100, Math.max(12, Math.round((Math.max(0, s.totalServiceRevenue) / posSum) * 100)));
-  const pctPack = Math.min(100, Math.max(10, Math.round((Math.max(0, s.packProfitTotal || 0) / posSum) * 100)));
-  const pctFx = Math.min(100, Math.max(10, Math.round((Math.max(0, s.fxProfitTotal) / posSum) * 100)));
-  const collectRatio = s.totalBilledCustomer > 0 ? Math.min(100, Math.round((s.totalCollectedFromCustomer / s.totalBilledCustomer) * 100)) : 80;
+  const posSum = Math.max(0, s.shipProfitTotal) + Math.max(0, s.totalServiceRevenue) + Math.max(0, s.packProfitTotal || 0) + Math.max(0, s.fxProfitTotal);
+  const pctShip = posSum > 0 ? Math.min(100, Math.round((Math.max(0, s.shipProfitTotal) / posSum) * 100)) : 0;
+  const pctFee = posSum > 0 ? Math.min(100, Math.round((Math.max(0, s.totalServiceRevenue) / posSum) * 100)) : 0;
+  const pctPack = posSum > 0 ? Math.min(100, Math.round((Math.max(0, s.packProfitTotal || 0) / posSum) * 100)) : 0;
+  const pctFx = posSum > 0 ? Math.min(100, Math.round((Math.max(0, s.fxProfitTotal) / posSum) * 100)) : 0;
+  const collectRatio = s.totalBilledCustomer > 0 ? Math.min(100, Math.round((s.totalCollectedFromCustomer / s.totalBilledCustomer) * 100)) : (s.totalCollectedFromCustomer > 0 ? 100 : 0);
 
   return `<div class="traffic-card">
     <div class="traffic-head">
       <div>
-        <h3 class="traffic-title">Traffic · Lưu lượng Dòng tiền & Lợi nhuận</h3>
-        <div class="traffic-sub">${esc(periodLabel)} · DAIRYCOW LOGISTICS (Xanh lam: Dòng thu · Xanh lá: Lợi nhuận · Đứt nét đỏ: Chi/Chuyển ra)</div>
+        <h3 class="traffic-title">Traffic · Lưu lượng Đơn hàng, Dòng tiền & Lợi nhuận</h3>
+        <div class="traffic-sub">${esc(periodLabel)} · <b>${s.totalTrafficOrders} đơn</b> (${s.orderCount} Note đơn · ${s.shipmentCount} Ký gửi · ${s.purchaseCount} Mua hộ) · Xanh lam: Thu · Xanh lá: Lãi · Đứt nét đỏ: Chi</div>
       </div>
       <div class="traffic-controls">
         <div class="btn-group-seg" role="group" aria-label="Chế độ kỳ báo cáo">
-          <button type="button" class="seg-btn ${periodMode === 'day' ? 'active' : ''}" onclick="periodMode='day';render()">Day</button>
-          <button type="button" class="seg-btn ${periodMode === 'month' ? 'active' : ''}" onclick="periodMode='month';render()">Month</button>
-          <button type="button" class="seg-btn ${periodMode === 'year' ? 'active' : ''}" onclick="periodMode='year';render()">Year</button>
-          <button type="button" class="seg-btn ${periodMode === 'all' ? 'active' : ''}" onclick="periodMode='all';render()">All</button>
+          <button type="button" class="seg-btn ${periodMode === 'bizperiod' ? 'active' : ''}" onclick="periodMode='bizperiod';render()">Kỳ 26</button>
+          <button type="button" class="seg-btn ${periodMode === 'day' ? 'active' : ''}" onclick="periodMode='day';render()">Ngày</button>
+          <button type="button" class="seg-btn ${periodMode === 'month' ? 'active' : ''}" onclick="periodMode='month';render()">Tháng</button>
+          <button type="button" class="seg-btn ${periodMode === 'year' ? 'active' : ''}" onclick="periodMode='year';render()">Năm</button>
+          <button type="button" class="seg-btn ${periodMode === 'all' ? 'active' : ''}" onclick="periodMode='all';render()">Tất cả</button>
         </div>
-        <button type="button" class="cloud-btn" onclick="exportData()" title="Xuất báo cáo sao lưu JSON">☁ ↓</button>
+        <button type="button" class="cloud-btn" onclick="openFinanceSubtab('periods')" title="Xem lịch sử các kỳ chốt ngày 26">📅</button>
       </div>
     </div>
 
     <div class="traffic-chart-wrap">
-      <svg viewBox="0 0 ${W} ${H}" class="traffic-svg" aria-label="Biểu đồ lưu lượng dòng tiền và lợi nhuận">
+      ${hasRealPoints ? `<svg viewBox="0 0 ${W} ${H}" class="traffic-svg" aria-label="Biểu đồ lưu lượng dòng tiền và lợi nhuận">
         ${[0, 0.25, 0.5, 0.75, 1].map(r => {
           const y = (padT + plotH * (1 - r)).toFixed(1);
           const vLabel = shortMoney(maxV * r);
@@ -873,28 +1469,34 @@ function renderTrafficChartCard(s, periodLabel) {
             <text x="${padL - 8}" y="${Number(y) + 4}" text-anchor="end" font-size="10" fill="#73818f">${vLabel}</text>
           </g>`;
         }).join('')}
-        <path d="${inArea}" fill="rgba(32, 168, 216, 0.14)"/>
-        <path d="${inLine}" fill="none" stroke="#20a8d8" stroke-width="2.4"/>
-        <path d="${profLine}" fill="none" stroke="#4dbd74" stroke-width="2.4"/>
-        <path d="${outLine}" fill="none" stroke="#f86c6b" stroke-width="1.8" stroke-dasharray="5 4"/>
+        ${inArea ? `<path d="${inArea}" fill="rgba(32, 168, 216, 0.14)"/>` : ''}
+        ${inCoords.length >= 2 ? `<path d="${inLine}" fill="none" stroke="#20a8d8" stroke-width="2.4"/>` : ''}
+        ${profCoords.length >= 2 ? `<path d="${profLine}" fill="none" stroke="#4dbd74" stroke-width="2.4"/>` : ''}
+        ${outCoords.length >= 2 ? `<path d="${outLine}" fill="none" stroke="#f86c6b" stroke-width="1.8" stroke-dasharray="5 4"/>` : ''}
         ${inCoords.map((c, idx) => `<g>
-          <circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.2" fill="#fff" stroke="#20a8d8" stroke-width="2">
-            <title>${esc(c.lbl)} · Thu: +${money(c.v)} ₫ · Lãi: +${money(profCoords[idx].v)} ₫</title>
+          <circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="4" fill="#fff" stroke="#20a8d8" stroke-width="2">
+            <title>${esc(c.lbl)} · ${c.orders} đơn · Thu: +${money(c.v)} ₫ · Chi: −${money(outCoords[idx].v)} ₫ · Lãi: ${profCoords[idx].v >= 0 ? '+' : ''}${money(profCoords[idx].v)} ₫</title>
+          </circle>
+          <circle cx="${profCoords[idx].x.toFixed(1)}" cy="${profCoords[idx].y.toFixed(1)}" r="3" fill="#4dbd74">
+            <title>${esc(c.lbl)} · Lãi: ${profCoords[idx].v >= 0 ? '+' : ''}${money(profCoords[idx].v)} ₫</title>
           </circle>
           <text x="${c.x.toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#73818f">${esc(c.lbl)}</text>
         </g>`).join('')}
-      </svg>
+      </svg>` : `<div class="traffic-empty-zero">
+        <strong>✨ ${esc(periodLabel)} đang bắt đầu từ 0</strong>
+        <p>Chưa có đơn hàng hoặc giao dịch phát sinh trong kỳ này. Dữ liệu các kỳ trước vẫn được lưu nguyên vẹn trong <b>Lịch sử Kỳ chốt ngày 26</b>.</p>
+      </div>`}
     </div>
 
     <div class="traffic-footer">
       <div class="tf-col">
-        <span class="tf-label">Đã thu từ khách</span>
+        <span class="tf-label">Đã thu trong kỳ${s.debtRecoveryIn > 0 ? ` (gồm nợ cũ +${shortMoney(s.debtRecoveryIn)})` : ''}</span>
         <strong class="tf-val">${money(s.totalCollectedFromCustomer)} ₫ (${collectRatio}%)</strong>
         <div class="tf-bar"><span style="width:${collectRatio}%;background:#4dbd74"></span></div>
       </div>
       <div class="tf-col">
         <span class="tf-label">Lãi cước vận chuyển</span>
-        <strong class="tf-val">+${money(s.shipProfitTotal)} ₫ (${pctShip}%)</strong>
+        <strong class="tf-val">${s.shipProfitTotal >= 0 ? '+' : ''}${money(s.shipProfitTotal)} ₫ (${pctShip}%)</strong>
         <div class="tf-bar"><span style="width:${pctShip}%;background:#63c2de"></span></div>
       </div>
       <div class="tf-col">
@@ -904,32 +1506,32 @@ function renderTrafficChartCard(s, periodLabel) {
       </div>
       <div class="tf-col">
         <span class="tf-label">Lãi Dịch vụ Đóng gói</span>
-        <strong class="tf-val">+${money(s.packProfitTotal || 0)} ₫ (${pctPack}%)</strong>
+        <strong class="tf-val">${(s.packProfitTotal || 0) >= 0 ? '+' : ''}${money(s.packProfitTotal || 0)} ₫ (${pctPack}%)</strong>
         <div class="tf-bar"><span style="width:${pctPack}%;background:#f86c6b"></span></div>
       </div>
       <div class="tf-col">
         <span class="tf-label">Lãi tỷ giá tệ (FX)</span>
-        <strong class="tf-val">+${money(s.fxProfitTotal)} ₫ (${pctFx}%)</strong>
+        <strong class="tf-val">${s.fxProfitTotal >= 0 ? '+' : ''}${money(s.fxProfitTotal)} ₫ (${pctFx}%)</strong>
         <div class="tf-bar"><span style="width:${pctFx}%;background:#20a8d8"></span></div>
       </div>
     </div>
   </div>`;
 }
 
-function renderCoreUiChannelCards() {
-  const orders = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy');
+function renderCoreUiChannelCards(filterSpec = null, periodStats = null) {
+  const matchDate = d => matchesDateFilter(d, filterSpec);
+  const orders = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchDate(o.date));
   const xtOrders = orders.filter(o => o.lineType === 'Xách tay');
   const xtProfit = xtOrders.reduce((s, o) => s + calcOrderMetrics(o).netProfit, 0);
 
   const tthOrders = orders.filter(o => o.lineType === 'Thanh toán hộ');
   const tthProfit = tthOrders.reduce((s, o) => s + calcOrderMetrics(o).netProfit, 0);
 
-  const shipments = db.shipments || [];
+  const shipments = (db.shipments || []).filter(s => matchDate(s.date));
   const activeShip = shipments.filter(s => s.status !== 'Đã giao khách').length;
 
-  const incSum = calcIncidentalsSummary();
   const packItemsCount = (db.packagingCatalog || []).length;
-  const packProfit = incSum.totalPackProfit;
+  const packProfit = periodStats ? (periodStats.packProfitTotal || 0) : 0;
 
   return `<div class="channel-grid">
     <div class="channel-card" onclick="jumpToOrderFilter('__line_Xách tay')">
@@ -939,8 +1541,8 @@ function renderCoreUiChannelCards() {
         <svg class="channel-wave" viewBox="0 0 240 90" preserveAspectRatio="none"><path d="M0,68 Q60,30 120,58 T240,38 L240,90 L0,90 Z" fill="rgba(255,255,255,0.12)"/><path d="M0,68 Q60,30 120,58 T240,38" fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="1.8"/></svg>
       </div>
       <div class="channel-foot">
-        <div class="ch-stat"><strong>${xtOrders.length} đơn</strong><span>Số lượng</span></div>
-        <div class="ch-stat"><strong>+${shortMoney(xtProfit)} ₫</strong><span>Lãi ròng</span></div>
+        <div class="ch-stat"><strong>${xtOrders.length} đơn</strong><span>Trong kỳ</span></div>
+        <div class="ch-stat"><strong>${xtProfit >= 0 ? '+' : ''}${shortMoney(xtProfit)} ₫</strong><span>Lãi ròng</span></div>
       </div>
     </div>
 
@@ -951,8 +1553,8 @@ function renderCoreUiChannelCards() {
         <svg class="channel-wave" viewBox="0 0 240 90" preserveAspectRatio="none"><path d="M0,62 Q70,78 135,44 T240,28 L240,90 L0,90 Z" fill="rgba(255,255,255,0.14)"/><path d="M0,62 Q70,78 135,44 T240,28" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1.8"/></svg>
       </div>
       <div class="channel-foot">
-        <div class="ch-stat"><strong>${tthOrders.length} đơn</strong><span>Số lượng</span></div>
-        <div class="ch-stat"><strong>+${shortMoney(tthProfit)} ₫</strong><span>Lãi ròng</span></div>
+        <div class="ch-stat"><strong>${tthOrders.length} đơn</strong><span>Trong kỳ</span></div>
+        <div class="ch-stat"><strong>${tthProfit >= 0 ? '+' : ''}${shortMoney(tthProfit)} ₫</strong><span>Lãi ròng</span></div>
       </div>
     </div>
 
@@ -963,7 +1565,7 @@ function renderCoreUiChannelCards() {
         <svg class="channel-wave" viewBox="0 0 240 90" preserveAspectRatio="none"><path d="M0,45 Q65,24 130,56 T240,52 L240,90 L0,90 Z" fill="rgba(255,255,255,0.12)"/><path d="M0,45 Q65,24 130,56 T240,52" fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="1.8"/></svg>
       </div>
       <div class="channel-foot">
-        <div class="ch-stat"><strong>${shipments.length} VĐ</strong><span>Tổng ký gửi</span></div>
+        <div class="ch-stat"><strong>${shipments.length} VĐ</strong><span>Ký gửi kỳ này</span></div>
         <div class="ch-stat"><strong>${activeShip} kiện</strong><span>Đang vận hành</span></div>
       </div>
     </div>
@@ -976,7 +1578,7 @@ function renderCoreUiChannelCards() {
       </div>
       <div class="channel-foot">
         <div class="ch-stat"><strong>${packItemsCount} mục</strong><span>Danh mục ĐG</span></div>
-        <div class="ch-stat"><strong>+${shortMoney(packProfit)} ₫</strong><span>Lãi đóng gói</span></div>
+        <div class="ch-stat"><strong>${packProfit >= 0 ? '+' : ''}${shortMoney(packProfit)} ₫</strong><span>Lãi ĐG kỳ này</span></div>
       </div>
     </div>
   </div>`;
@@ -1047,12 +1649,14 @@ function renderProfitDonutChart(s, periodText) {
   </div>`;
 }
 
-function renderCashflowBarChart(prefix = '') {
+function renderCashflowBarChart(filterSpec = '') {
   const bucketMap = new Map();
-  const useMonthly = prefix.length === 4; // Đang xem theo Năm -> gom theo Tháng
+  const isObj = filterSpec && typeof filterSpec === 'object';
+  const useMonthly = isObj ? filterSpec.mode === 'year' : String(filterSpec || '').length === 4;
+  const matchDate = d => matchesDateFilter(d, filterSpec);
 
   const getKey = d => {
-    const raw = d || dateKey();
+    const raw = normalizeDateStr(d) || dateKey();
     return useMonthly ? raw.slice(0, 7) : raw;
   };
   const ensure = k => {
@@ -1060,38 +1664,46 @@ function renderCashflowBarChart(prefix = '') {
     return bucketMap.get(k);
   };
 
-  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && (!prefix || String(o.date || '').startsWith(prefix))).forEach(o => {
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchDate(o.date)).forEach(o => {
     const b = ensure(getKey(o.date));
     const m = calcOrderMetrics(o);
-    b.moneyIn += m.customerPaid;
-    b.moneyOut += ((o.includeGoodsInFlow && o.partnerPaid) ? m.baseGoodsCostVnd : 0) + (o.warehousePaid ? m.shipCost : 0) + m.extraCost;
+    b.moneyIn += getOrderLegacyPaid(o);
+    const whPaidSame = o.warehousePaid && (!o.warehousePaidDate || matchDate(o.warehousePaidDate));
+    b.moneyOut += ((o.includeGoodsInFlow && o.partnerPaid) ? m.baseGoodsCostVnd : 0) + (whPaidSame ? m.shipCost : 0) + m.packCost + m.extraCost;
     b.profit += m.netProfit;
   });
 
-  (db.transactions || []).filter(x => !prefix || String(x.date || '').startsWith(prefix)).forEach(x => {
+  (db.extraShipments || []).filter(x => matchDate(x.date)).forEach(x => {
+    const lp = getExtraLegacyPaid(x);
+    if (lp > 0) ensure(getKey(x.date)).moneyIn += lp;
+  });
+
+  (db.paymentRecords || []).filter(p => matchDate(p.date)).forEach(p => {
+    const amt = Math.max(0, Math.round(parseNum(p.amount)));
+    if (amt > 0) ensure(getKey(p.date)).moneyIn += amt;
+  });
+
+  const nonProfitCats = ['Thu hộ', 'Thu công nợ', 'Thu công nợ kỳ trước'];
+  (db.transactions || []).filter(x => matchDate(x.date)).forEach(x => {
     const b = ensure(getKey(x.date));
     const amt = parseNum(x.amount);
     if (x.type === 'Thu') {
       b.moneyIn += amt;
-      b.profit += amt;
+      if (!nonProfitCats.includes(x.category)) b.profit += amt;
     } else {
       b.moneyOut += amt;
       b.profit -= amt;
     }
   });
 
-  let buckets = [...bucketMap.values()].sort((a, b) => a.key.localeCompare(b.key)).slice(-6);
-  if (!buckets.length) {
-    buckets = [{ key: dateKey(), moneyIn: 0, moneyOut: 0, profit: 0 }];
-  }
-
-  const maxVal = Math.max(100000, ...buckets.flatMap(b => [b.moneyIn, b.moneyOut, Math.abs(b.profit)]));
+  const buckets = [...bucketMap.values()].sort((a, b) => a.key.localeCompare(b.key)).slice(-8);
+  const maxVal = buckets.length ? Math.max(100000, ...buckets.flatMap(b => [b.moneyIn, b.moneyOut, Math.abs(b.profit)])) : 100000;
 
   return `<div class="chart-panel">
     <div class="chart-panel-head">
       <div>
         <div class="chart-panel-title">📊 Biểu đồ Thu · Chi · Lợi nhuận</div>
-        <div class="chart-panel-sub">So sánh trực quan dòng tiền vào, chuyển ra và lãi ròng (di chuột vào cột để xem số chi tiết)</div>
+        <div class="chart-panel-sub">So sánh trực quan dòng tiền vào (gồm thu nợ kỳ trước), chuyển ra và lãi ròng trong kỳ</div>
       </div>
       <div class="chart-legend-inline">
         <span><i class="swatch" style="background:#10b981"></i> Thu vào</span>
@@ -1099,7 +1711,7 @@ function renderCashflowBarChart(prefix = '') {
         <span><i class="swatch" style="background:#2563eb"></i> Lợi nhuận</span>
       </div>
     </div>
-    <div class="vbar-stage">
+    ${buckets.length ? `<div class="vbar-stage">
       ${buckets.map(b => {
         const hIn = b.moneyIn > 0 ? Math.max(6, Math.round((b.moneyIn / maxVal) * 140)) : 3;
         const hOut = b.moneyOut > 0 ? Math.max(6, Math.round((b.moneyOut / maxVal) * 140)) : 3;
@@ -1114,12 +1726,12 @@ function renderCashflowBarChart(prefix = '') {
           <span class="vbar-label">${esc(lbl)}</span>
         </div>`;
       }).join('')}
-    </div>
+    </div>` : '<div class="empty" style="padding:20px"><p>Chưa có dòng tiền phát sinh trong kỳ đã chọn (đang ở mức 0 ₫).</p></div>'}
   </div>`;
 }
 
-function renderOrderPipelineBar() {
-  const activeOrders = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy');
+function renderOrderPipelineBar(filterSpec = null, periodLabel = '') {
+  const activeOrders = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchesDateFilter(o.date, filterSpec));
   const groups = [
     { label: 'Chờ xử lý / Thanh toán', stages: ['Mới tạo / Chờ xử lý', 'Chờ khách thanh toán'], color: '#f59e0b', filter: '__pipe_wait' },
     { label: 'Đang vận chuyển / Đã TT', stages: ['Đã thanh toán hộ', 'Đang vận chuyển'], color: '#3b82f6', filter: '__pipe_ship' },
@@ -1135,8 +1747,8 @@ function renderOrderPipelineBar() {
   return `<div class="pipeline-panel">
     <div class="chart-panel-head">
       <div>
-        <div class="chart-panel-title">🚚 Tiến độ các Note đơn hiện tại (${activeOrders.length} đơn)</div>
-        <div class="chart-panel-sub">Bấm vào từng nhãn màu bên dưới để lọc nhanh danh sách đơn</div>
+        <div class="chart-panel-title">🚚 Tiến độ Note đơn trong kỳ (${activeOrders.length} đơn)</div>
+        <div class="chart-panel-sub">${periodLabel ? esc(periodLabel) + ' · ' : ''}Bấm vào nhãn màu để lọc nhanh danh sách đơn</div>
       </div>
       <button type="button" class="link-btn" onclick="setView('orders',document.querySelector('[data-view=orders]'))">Xem bảng Note đơn →</button>
     </div>
@@ -1153,11 +1765,11 @@ function renderOrderPipelineBar() {
   </div>`;
 }
 
-function renderGoodsCategoryChart(prefix = '') {
+function renderGoodsCategoryChart(filterSpec = '') {
   const palette = ['#2563eb', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#0d9488', '#f97316'];
   const map = new Map();
 
-  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && (!prefix || String(o.date || '').startsWith(prefix))).forEach(o => {
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchesDateFilter(o.date, filterSpec)).forEach(o => {
     const k = o.goodsType || 'Khác';
     const cur = map.get(k) || { name: k, orders: 0, pkgs: 0, profit: 0 };
     cur.orders += 1;
@@ -1245,12 +1857,31 @@ function quickStatus(kind, id, newStatus) {
   const oldStatus = item.status;
   if (oldStatus === newStatus) return;
   const stamp = nowStamp();
+  const prevExtraPaid = kind === 'extraship' ? getExtraCurrentPaid(item) : 0;
   item.status = newStatus;
   if (kind === 'extraship') {
     if (newStatus === 'Đã thu') item.paidAmount = Math.round(parseNum(item.amount));
     if (newStatus === 'Chưa thu') item.paidAmount = 0;
+    const nextExtraPaid = getExtraCurrentPaid(item);
+    if (nextExtraPaid > prevExtraPaid) {
+      recordPaymentEvent({
+        kind: 'extraship',
+        extraShipId: item.id,
+        orderId: item.orderId || '',
+        orderCode: item.orderCode || '',
+        customer: item.customer || '',
+        amount: nextExtraPaid - prevExtraPaid,
+        date: dateKey(),
+        originDate: item.date,
+        note: `Thu cước ship phát sinh (${item.content || ''})`
+      });
+    } else if (nextExtraPaid < prevExtraPaid) {
+      reducePaymentEvents('extraship', item.id, prevExtraPaid - nextExtraPaid);
+    }
   }
+  // Đổi trạng thái giữ nguyên item.date ban đầu -> không biến đơn kỳ cũ thành đơn mới của kỳ hiện tại
   item.updatedAt = stamp;
+  item.updatedAtMs = Date.now();
   if (!Array.isArray(item.history)) item.history = [];
   item.history.unshift({
     time: nowStamp(true),
@@ -1269,27 +1900,76 @@ function settleOrderDebt(id, targetType) {
   if (!o) return;
   const m = calcOrderMetrics(o);
   const stamp = nowStamp();
+  const payDate = dateKey();
   if (!Array.isArray(o.history)) o.history = [];
 
   if (targetType === 'customer') {
-    o.customerPaid = Math.max(0, m.totalCollectCustomer - m.extraShipPaid);
-    // Đồng thời đánh dấu Đã thu cho các khoản cước ship phát sinh liên kết với đơn này
+    let extraCollectedNow = 0;
+    // Đồng thời đánh dấu Đã thu cho các khoản cước ship phát sinh liên kết với đơn này và ghi nhận ngày thực thu
     (db.extraShipments || []).forEach(x => {
       if ((o.id && x.orderId === o.id) || (o.code && x.orderCode && String(x.orderCode).trim().toLowerCase() === String(o.code).trim().toLowerCase())) {
+        const amt = Math.round(parseNum(x.amount));
+        const prevPaid = getExtraCurrentPaid(x);
+        const delta = Math.max(0, amt - prevPaid);
         x.status = 'Đã thu';
-        x.paidAmount = Math.round(parseNum(x.amount));
+        x.paidAmount = amt;
         x.updatedAt = stamp;
+        x.updatedAtMs = Date.now();
+        if (delta > 0) {
+          extraCollectedNow += delta;
+          recordPaymentEvent({
+            kind: 'extraship',
+            extraShipId: x.id,
+            orderId: o.id,
+            orderCode: x.orderCode || o.code || '',
+            customer: x.customer || o.customer || '',
+            amount: delta,
+            date: payDate,
+            originDate: x.date || o.date,
+            note: `Thu đủ cước ship PS liên kết đơn ${o.code || ''}`
+          });
+        }
       }
     });
+
+    const baseTarget = Math.max(0, m.totalCollectCustomer - m.extraShipTotal);
+    const prevOrderPaid = Math.round(parseNum(o.customerPaid));
+    const orderDelta = Math.max(0, baseTarget - prevOrderPaid);
+    o.customerPaid = prevOrderPaid + orderDelta;
+    if (orderDelta > 0) {
+      recordPaymentEvent({
+        kind: 'order',
+        orderId: o.id,
+        orderCode: o.code || '',
+        customer: o.customer || '',
+        amount: orderDelta,
+        date: payDate,
+        originDate: o.date,
+        note: `Thu đủ công nợ đơn ${o.product || o.goodsType || o.code || ''}`
+      });
+    }
+
+    const totalCollectedNow = orderDelta + extraCollectedNow;
+    const payPeriod = getBusinessPeriodForDate(payDate);
+    const origPeriod = getBusinessPeriodForDate(o.date);
+    const recoveryTag = origPeriod.id !== payPeriod.id ? ` (Thu công nợ kỳ trước -> dòng tiền ${payPeriod.shortLabel})` : '';
+
     o.updatedAt = stamp;
-    o.history.unshift({ time: nowStamp(true), action: 'Thu đủ tiền khách', detail: `Đã thu đủ ${money(m.totalCollectCustomer)} ₫` });
-    addAuditLog('Thu đủ công nợ', `Khách ${o.customer}`, `Thu đủ ${money(m.totalCollectCustomer)} ₫ cho đơn ${o.product || o.goodsType}`);
-    toast(`✓ Đã xác nhận thu đủ ${money(m.totalCollectCustomer)} ₫ từ ${o.customer}`);
+    o.updatedAtMs = Date.now();
+    o.history.unshift({
+      time: nowStamp(true),
+      action: 'Thu đủ tiền khách',
+      detail: `Thực thu +${money(totalCollectedNow)} ₫ ngày ${dateText(payDate)} · Tổng đã thu ${money(m.totalCollectCustomer)} ₫${recoveryTag}`
+    });
+    addAuditLog('Thu đủ công nợ', `Khách ${o.customer}`, `Thực thu +${money(totalCollectedNow)} ₫ ngày ${dateText(payDate)} cho đơn ${o.product || o.goodsType}${recoveryTag}`);
+    toast(`✓ Đã thu +${money(totalCollectedNow)} ₫ từ ${o.customer}${origPeriod.id !== payPeriod.id ? ' (ghi nhận dòng tiền kỳ hiện tại)' : ''}`);
   } else if (targetType === 'warehouse') {
     o.warehousePaid = true;
+    o.warehousePaidDate = payDate;
     o.updatedAt = stamp;
-    o.history.unshift({ time: nowStamp(true), action: 'Thanh toán cước kho', detail: `Đã trả kho ${money(m.shipCost)} ₫` });
-    addAuditLog('Trả cước kho', `Đơn ${o.customer}`, `Đã thanh toán cước gốc ${money(m.shipCost)} ₫ cho kho`);
+    o.updatedAtMs = Date.now();
+    o.history.unshift({ time: nowStamp(true), action: 'Thanh toán cước kho', detail: `Đã trả kho ${money(m.shipCost)} ₫ ngày ${dateText(payDate)}` });
+    addAuditLog('Trả cước kho', `Đơn ${o.customer}`, `Đã thanh toán cước gốc ${money(m.shipCost)} ₫ cho kho ngày ${dateText(payDate)}`);
     toast(`✓ Đã đánh dấu trả kho ${money(m.shipCost)} ₫`);
   }
   persist();
@@ -1704,15 +2384,51 @@ function kpiCard(label, val, sub, icon, tone = 'blue', onClick = '') {
 }
 
 // ============================================================================
-// TRANG 1: DASHBOARD TỔNG QUAN (CHUẨN COREUI & CREATIVE TIM)
+// TRANG 1: DASHBOARD TỔNG QUAN (CHUẨN COREUI & CREATIVE TIM · CHỐT KỲ NGÀY 26)
 // ============================================================================
+function renderBusinessPeriodBanner() {
+  const curP = getCurrentBusinessPeriod();
+  const activeP = getSelectedBusinessPeriod();
+  const periods = (db.businessPeriods || []).length ? db.businessPeriods : [activeP];
+  const isClosed = activeP.status === 'closed';
+  const nextCloseDate = dateText(getNextBusinessPeriod(curP).startDate);
+  const adjCount = Array.isArray(activeP.adjustments) ? activeP.adjustments.length : 0;
+
+  return `<div class="biz-period-banner ${isClosed ? 'is-closed' : 'is-active'}">
+    <div class="biz-period-left">
+      <div class="biz-period-title-row">
+        <span class="biz-status-pill ${isClosed ? 'closed' : 'active'}">${isClosed ? '🔒 Kỳ đã chốt' : '● Đang hoạt động'}</span>
+        <strong>${esc(activeP.label)}</strong>
+        ${adjCount > 0 ? `<span class="biz-adj-pill" title="Có ghi nhận điều chỉnh sau khi chốt kỳ">⚠ ${adjCount} điều chỉnh sau chốt</span>` : ''}
+      </div>
+      <div class="biz-period-sub">
+        ${isClosed
+          ? `Đã chốt lúc <b>${esc(activeP.closedAt || '00:00 ngày 26')}</b> · Dữ liệu lịch sử được bảo toàn nguyên vẹn (công nợ chưa thu vẫn chuyển tiếp sang kỳ hiện tại).`
+          : `Chu kỳ tự động chốt lúc <b>00:00 ngày ${esc(nextCloseDate)}</b> (Múi giờ ${APP_TIMEZONE}). Bộ đếm kỳ mới bắt đầu từ 0 · Công nợ chưa thu được bảo toàn xuyên kỳ.`}
+      </div>
+    </div>
+    <div class="biz-period-controls">
+      <label class="biz-period-select-wrap">
+        <span>Chọn kỳ xem:</span>
+        <select class="select biz-period-select" aria-label="Chọn kỳ kinh doanh chốt ngày 26" onchange="selectBusinessPeriod(this.value)">
+          ${periods.map(p => `<option value="${esc(p.id)}" ${p.id === activeP.id ? 'selected' : ''}>${p.status === 'active' ? '● ' : '🔒 '}${esc(p.label)}${p.status === 'active' ? ' (Hiện tại)' : ' (Đã chốt)'}</option>`).join('')}
+        </select>
+      </label>
+      ${isClosed ? `<button type="button" class="btn small primary" onclick="selectBusinessPeriod('${esc(curP.id)}')">↩ Về kỳ hiện tại</button>` : ''}
+      <button type="button" class="btn small" onclick="openFinanceSubtab('periods')">📅 Lịch sử các kỳ (${periods.length})</button>
+    </div>
+  </div>`;
+}
+
 function overviewPage() {
-  const curMonth = dateKey().slice(0, 7);
-  const s = calcPeriodFinancials(curMonth);
+  const filterSpec = getActivePeriodFilter();
+  const selectedPeriodObj = periodMode === 'bizperiod' ? getSelectedBusinessPeriod() : null;
   const allStats = calcPeriodFinancials('');
-  const activeStats = calcPeriodFinancials(getActivePeriodPrefix());
-  const chartStats = (activeStats.orderCount > 0 || activeStats.txCount > 0) ? activeStats : ((s.orderCount > 0 || s.txCount > 0) ? s : allStats);
-  const chartPeriodLabel = (activeStats.orderCount > 0 || activeStats.txCount > 0) ? getPeriodLabel() : ((s.orderCount > 0 || s.txCount > 0) ? `Tháng ${curMonth.split('-')[1]}/${curMonth.split('-')[0]}` : 'Toàn bộ dữ liệu');
+  // Nếu đang xem kỳ đã chốt: dùng đúng snapshot bảo toàn của kỳ đó (vẫn cho phép đối chiếu với thực tế)
+  const chartStats = (selectedPeriodObj && selectedPeriodObj.status === 'closed' && selectedPeriodObj.snapshot)
+    ? selectedPeriodObj.snapshot
+    : calcPeriodFinancials(filterSpec);
+  const chartPeriodLabel = getPeriodLabel(filterSpec);
 
   const allPending = getPendingItems();
   const hasAnyDebt = m => m.customerDebt > 0 || m.warehouseDebt > 0;
@@ -1727,15 +2443,17 @@ function overviewPage() {
   const recentLogs = (db.logs || []).slice(0, 6);
 
   return `<div class="section-stack">
-    ${renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPending.length)}
+    ${renderBusinessPeriodBanner()}
 
-    ${renderTrafficChartCard(chartStats, chartPeriodLabel)}
+    ${renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPending.length, selectedPeriodObj, filterSpec)}
 
-    ${renderCoreUiChannelCards()}
+    ${renderTrafficChartCard(chartStats, chartPeriodLabel, filterSpec)}
+
+    ${renderCoreUiChannelCards(filterSpec, chartStats)}
 
     <div class="visual-grid">
       ${renderProfitDonutChart(chartStats, chartPeriodLabel)}
-      ${renderOrderPipelineBar()}
+      ${renderOrderPipelineBar(filterSpec, chartPeriodLabel)}
     </div>
 
     <div class="overview-split">
@@ -2299,13 +3017,30 @@ function stepPackQty(id, delta) {
 function settleExtraShip(id) {
   const item = (db.extraShipments || []).find(x => x.id === id);
   if (!item) return;
+  const amt = Math.round(parseNum(item.amount));
+  const prevPaid = getExtraCurrentPaid(item);
+  const delta = Math.max(0, amt - prevPaid);
   item.status = 'Đã thu';
-  item.paidAmount = Math.round(parseNum(item.amount));
+  item.paidAmount = amt;
   item.updatedAt = nowStamp();
-  addAuditLog('Thu cước ship phát sinh', `${item.customer || item.orderCode || 'Khách hàng'}`, `Đã thu đủ ${money(item.amount)} ₫ (${item.content || ''})`);
+  item.updatedAtMs = Date.now();
+  if (delta > 0) {
+    recordPaymentEvent({
+      kind: 'extraship',
+      extraShipId: item.id,
+      orderId: item.orderId || '',
+      orderCode: item.orderCode || '',
+      customer: item.customer || '',
+      amount: delta,
+      date: dateKey(),
+      originDate: item.date,
+      note: `Thu đủ cước ship PS: ${item.content || ''}`
+    });
+  }
+  addAuditLog('Thu cước ship phát sinh', `${item.customer || item.orderCode || 'Khách hàng'}`, `Thực thu +${money(delta)} ₫ (${item.content || ''})`);
   persist();
   render();
-  toast(`✓ Đã thu đủ cước ship phát sinh: ${money(item.amount)} ₫`);
+  toast(`✓ Đã thu đủ cước ship phát sinh: +${money(delta)} ₫`);
 }
 
 function deleteExtraShip(id) {
@@ -2313,6 +3048,7 @@ function deleteExtraShip(id) {
   if (!item) return;
   if (!confirm(`Xóa khoản Cước ship phát sinh "${item.content || ''}" (${money(item.amount)} ₫) của khách ${item.customer || ''}?`)) return;
   saveAutoSnapshot(`Trước khi xóa cước ship ${item.orderCode || ''}`, true);
+  recordClosedPeriodAdjustment(item.date, 'Xóa cước ship PS kỳ đã chốt', item.customer || item.orderCode || 'Cước ship', `Đã xóa ${item.content || ''} (${money(item.amount)} ₫)`);
   markDeletedId(id);
   db.extraShipments = (db.extraShipments || []).filter(x => x.id !== id);
   addAuditLog('Xóa cước ship phát sinh', item.customer || item.orderCode || 'Cước ship', `Đã xóa ${item.content || ''} (${money(item.amount)} ₫)`);
@@ -2326,6 +3062,7 @@ function deletePackItem(id) {
   if (!item) return;
   if (!confirm(`Xóa sản phẩm đóng gói "${item.name}"? (Các đơn hàng cũ đã gắn sản phẩm này vẫn giữ nguyên dữ liệu lịch sử).`)) return;
   saveAutoSnapshot(`Trước khi xóa vật tư ${item.name}`, true);
+  recordClosedPeriodAdjustment(item.date, 'Xóa vật tư đóng gói kỳ đã chốt', item.name, `Đã xóa khỏi danh mục đóng gói`);
   markDeletedId(id);
   db.packagingCatalog = (db.packagingCatalog || []).filter(x => x.id !== id);
   addAuditLog('Xóa vật tư đóng gói', item.name, `Đã xóa khỏi danh mục đóng gói`);
@@ -2455,14 +3192,20 @@ function incidentalsPage() {
 }
 
 // ============================================================================
-// TRANG 3: THU CHI, CÔNG NỢ, BÁO CÁO AI & LỊCH SỬ (GỘP GỌN THÀNH 4 TAB RÕ RÀNG)
+// TRANG 3: THU CHI, CÔNG NỢ, BÁO CÁO AI, KỲ CHỐT 26 & LỊCH SỬ
 // ============================================================================
 function renderPeriodPicker() {
+  const periods = db.businessPeriods || [];
+  const activeP = getSelectedBusinessPeriod();
   return `<div class="period-bar">
+    <button type="button" class="chip ${periodMode === 'bizperiod' ? 'active' : ''}" onclick="periodMode='bizperiod';render()">Kỳ 26</button>
     <button type="button" class="chip ${periodMode === 'day' ? 'active' : ''}" onclick="periodMode='day';render()">Ngày</button>
     <button type="button" class="chip ${periodMode === 'month' ? 'active' : ''}" onclick="periodMode='month';render()">Tháng</button>
     <button type="button" class="chip ${periodMode === 'year' ? 'active' : ''}" onclick="periodMode='year';render()">Năm</button>
     <button type="button" class="chip ${periodMode === 'all' ? 'active' : ''}" onclick="periodMode='all';render()">Tất cả</button>
+    ${periodMode === 'bizperiod' ? `<select class="select" style="padding:5px 9px;font-size:12.5px" aria-label="Chọn kỳ kinh doanh" onchange="selectBusinessPeriod(this.value)">
+      ${(periods.length ? periods : [activeP]).map(p => `<option value="${esc(p.id)}" ${p.id === activeP.id ? 'selected' : ''}>${p.status === 'active' ? '● ' : '🔒 '}${esc(p.shortLabel || p.label)}</option>`).join('')}
+    </select>` : ''}
     ${periodMode === 'day' ? `<input type="date" class="field" style="padding:5px 9px" value="${esc(periodDate)}" onchange="periodDate=this.value;render()">` : ''}
     ${periodMode === 'month' ? `<input type="month" class="field" style="padding:5px 9px" value="${esc(periodMonth)}" onchange="periodMonth=this.value;render()">` : ''}
     ${periodMode === 'year' ? `<input type="number" class="field" style="padding:5px 9px;width:92px" min="2020" max="2100" value="${esc(periodYear)}" onchange="periodYear=this.value;render()">` : ''}
@@ -2470,10 +3213,10 @@ function renderPeriodPicker() {
 }
 
 function getFinanceViewData() {
-  const prefix = getActivePeriodPrefix();
+  const filterSpec = getActivePeriodFilter();
   const q = query.toLowerCase();
   const items = (db.transactions || [])
-    .filter(x => (!prefix || String(x.date || '').startsWith(prefix)) && (`${x.type} ${x.category} ${x.party} ${x.related} ${x.method} ${x.note}`.toLowerCase().includes(q)) && (!window.statusFilter || x.type === window.statusFilter))
+    .filter(x => matchesDateFilter(x.date, filterSpec) && (`${x.type} ${x.category} ${x.party} ${x.related} ${x.method} ${x.note}`.toLowerCase().includes(q)) && (!window.statusFilter || x.type === window.statusFilter))
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
   const rows = items.map(x => `<tr>
@@ -2526,33 +3269,46 @@ function getHistoryViewData() {
   return { totalCount: logs.length, filteredCount: filtered.length, tableHtml };
 }
 
-function getDailyBreakdown(prefix) {
+function getDailyBreakdown(filterSpec) {
   const map = new Map();
+  const matchDate = d => matchesDateFilter(d, filterSpec);
   const ensure = d => {
     if (!map.has(d)) map.set(d, { date: d, orders: 0, collected: 0, shipFee: 0, serviceFee: 0, extra: 0, profit: 0 });
     return map.get(d);
   };
 
-  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && (!prefix || String(o.date || '').startsWith(prefix))).forEach(o => {
-    const d = o.date || dateKey();
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchDate(o.date)).forEach(o => {
+    const d = normalizeDateStr(o.date) || dateKey();
     const row = ensure(d);
     const m = calcOrderMetrics(o);
     row.orders++;
-    row.collected += m.totalCollectCustomer; // hàng + DV (không gộp cước)
-    row.shipFee += m.shipCharge;             // cước riêng, hiển thị tách biệt
+    row.collected += getOrderLegacyPaid(o);
+    row.shipFee += m.shipCharge;
     row.serviceFee += m.serviceFee;
     row.extra += m.extraCost;
     row.profit += m.netProfit;
   });
 
-  (db.transactions || []).filter(x => !prefix || String(x.date || '').startsWith(prefix)).forEach(x => {
-    const d = x.date || dateKey();
+  (db.extraShipments || []).filter(x => matchDate(x.date)).forEach(x => {
+    const lp = getExtraLegacyPaid(x);
+    if (lp > 0) ensure(normalizeDateStr(x.date) || dateKey()).collected += lp;
+  });
+
+  (db.paymentRecords || []).filter(p => matchDate(p.date)).forEach(p => {
+    const d = normalizeDateStr(p.date) || dateKey();
+    const amt = Math.max(0, Math.round(parseNum(p.amount)));
+    if (amt > 0) ensure(d).collected += amt;
+  });
+
+  const nonProfitCats = ['Thu hộ', 'Thu công nợ', 'Thu công nợ kỳ trước'];
+  (db.transactions || []).filter(x => matchDate(x.date)).forEach(x => {
+    const d = normalizeDateStr(x.date) || dateKey();
     const row = ensure(d);
     const amt = parseNum(x.amount);
     if (x.type === 'Thu') {
       row.collected += amt;
       if (['Phí dịch vụ', 'Phí mua hộ'].includes(x.category)) row.serviceFee += amt;
-      row.profit += amt;
+      if (!nonProfitCats.includes(x.category)) row.profit += amt;
     } else {
       row.extra += amt;
       row.profit -= amt;
@@ -2562,73 +3318,321 @@ function getDailyBreakdown(prefix) {
   return [...map.values()].sort((a, b) => b.date.localeCompare(a.date));
 }
 
-function buildAiInsights(s) {
+function buildAiInsights(s, filterSpec = null) {
   const insights = [];
-  insights.push(`Kỳ <b>${esc(getPeriodLabel())}</b>: Lợi nhuận thực tế đạt <b class="${s.netProfit >= 0 ? 'income-color' : 'expense-color'}">${s.netProfit >= 0 ? '+' : ''}${money(s.netProfit)} ₫</b> (tổng hợp từ <b>${s.orderCount}</b> Note đơn và <b>${s.txCount}</b> giao dịch sổ thu chi).`);
+  const label = getPeriodLabel(filterSpec);
+  insights.push(`Kỳ <b>${esc(label)}</b>: Lợi nhuận thực tế đạt <b class="${s.netProfit >= 0 ? 'income-color' : 'expense-color'}">${s.netProfit >= 0 ? '+' : ''}${money(s.netProfit)} ₫</b> (tổng hợp từ <b>${s.orderCount}</b> Note đơn, <b>${s.shipmentCount || 0}</b> VĐ ký gửi và <b>${s.txCount}</b> giao dịch thu chi trong kỳ).`);
+
+  if (s.debtRecoveryIn > 0) {
+    insights.push(`Dòng tiền kỳ này có <b class="income-color">+${money(s.debtRecoveryIn)} ₫</b> tiền khách thanh toán <b>công nợ kỳ trước</b> (được ghi nhận vào dòng tiền thu kỳ này, KHÔNG cộng trùng vào lợi nhuận).`);
+  }
 
   const sources = [
     { name: 'Lãi phí vận chuyển', val: s.shipProfitTotal },
     { name: 'Doanh thu phí dịch vụ', val: s.totalServiceRevenue },
+    { name: 'Lãi dịch vụ đóng gói', val: s.packProfitTotal || 0 },
     { name: 'Chênh lệch tỷ giá tệ', val: s.fxProfitTotal }
   ].sort((a, b) => b.val - a.val);
 
   if (sources[0].val > 0) {
-    insights.push(`Nguồn đóng góp lãi cao nhất là <b>${sources[0].name} (+${money(sources[0].val)} ₫)</b>.`);
+    insights.push(`Nguồn đóng góp lãi cao nhất trong kỳ là <b>${sources[0].name} (+${money(sources[0].val)} ₫)</b>.`);
   }
 
-  const lossOrders = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && calcOrderMetrics(o).netProfit < 0);
+  const lossOrders = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchesDateFilter(o.date, filterSpec) && calcOrderMetrics(o).netProfit < 0);
   if (lossOrders.length > 0) {
-    insights.push(`<span class="expense-color"><b>Cảnh báo kiểm tra:</b> Có <b>${lossOrders.length} đơn</b> đang bị âm lợi nhuận (${lossOrders.map(x => esc(x.customer)).join(', ')}) — hãy kiểm tra lại cước thu khách hoặc phụ phí phát sinh.</span>`);
+    insights.push(`<span class="expense-color"><b>Cảnh báo kiểm tra:</b> Có <b>${lossOrders.length} đơn</b> trong kỳ đang bị âm lợi nhuận (${lossOrders.map(x => esc(x.customer)).join(', ')}) — hãy kiểm tra lại cước thu khách hoặc phụ phí phát sinh.</span>`);
   }
 
-  if (s.allCustomerDebt > 0 || s.allWarehouseUnpaid > 0 || s.allPartnerUnpaid > 0) {
-    insights.push(`Công nợ cần lưu ý: Khách còn nợ <b>${money(s.allCustomerDebt)} ₫</b> · Cước kho chưa thanh toán <b>${money(s.allWarehouseUnpaid)} ₫</b>${s.allPartnerUnpaid > 0 ? ` · Tiền hàng chưa chuyển <b>${money(s.allPartnerUnpaid)} ₫</b>` : ''}.`);
+  if (s.allCustomerDebt > 0 || s.allWarehouseUnpaid > 0) {
+    insights.push(`Phân tách công nợ: <b>Phát sinh mới kỳ này: ${money(s.periodNewCustomerDebt || 0)} ₫</b> · <b>Tổng công nợ thực tế còn phải thu (xuyên kỳ): ${money(s.allCustomerDebt)} ₫</b> · Cước kho chưa trả: <b>${money(s.allWarehouseUnpaid)} ₫</b>.`);
   } else {
     insights.push(`Tuyệt vời: Tất cả công nợ khách hàng và tiền cước kho đều đã được tất toán sạch sẽ.`);
   }
   return insights;
 }
 
+function refreshClosedPeriodSnapshotControlled(periodId) {
+  const p = (db.businessPeriods || []).find(x => x.id === periodId && x.status === 'closed');
+  if (!p) return;
+  if (!confirm(`Cập nhật lại số liệu báo cáo đã chốt của ${p.label} theo các điều chỉnh sau chốt đã ghi nhận?\n\nHệ thống sẽ tự chụp 1 bản dự phòng và lưu lịch sử đối chiếu.`)) {
+    return;
+  }
+  saveAutoSnapshot(`Trước khi cập nhật đối chiếu ${p.label}`, true);
+  const oldProfit = p.snapshot?.netProfit || 0;
+  const oldDebt = p.snapshot?.endingCustomerDebt || 0;
+  const nextSnap = computeBusinessPeriodSnapshot(p);
+  p.snapshot = nextSnap;
+  if (!Array.isArray(p.adjustments)) p.adjustments = [];
+  p.adjustments.unshift({
+    id: 'adj_' + makeId(),
+    time: nowStamp(true),
+    action: 'Cập nhật lại báo cáo kỳ đã chốt',
+    target: p.label,
+    detail: `Lãi: ${money(oldProfit)} → ${money(nextSnap.netProfit)} ₫ · Nợ cuối kỳ: ${money(oldDebt)} → ${money(nextSnap.endingCustomerDebt)} ₫`
+  });
+  p.updatedAtMs = Date.now();
+  addAuditLog('Đối chiếu lại kỳ đã chốt', p.label, `Admin xác nhận cập nhật báo cáo có kiểm soát (Lãi ${money(nextSnap.netProfit)} ₫)`);
+  persist({ skipSnapshot: true });
+  render();
+  toast(`✓ Đã cập nhật báo cáo ${p.label} có ghi log kiểm soát`);
+}
+
+function renderBusinessPeriodsTab(topToolbar) {
+  const periods = (db.businessPeriods || []).length ? db.businessPeriods : [getSelectedBusinessPeriod()];
+  const curP = getCurrentBusinessPeriod();
+  const detailObj = periods.find(p => p.id === periodDetailId) || periods.find(p => p.id === selectedBusinessPeriodId) || periods[0];
+  const isDetailClosed = detailObj && detailObj.status === 'closed' && detailObj.snapshot;
+  const detailStats = isDetailClosed
+    ? detailObj.snapshot
+    : calcPeriodFinancials({ startDate: detailObj.startDate, endDate: detailObj.endDate, periodId: detailObj.id, asOfDate: '' });
+
+  // Đối chiếu live hiện tại cho các khoản công nợ cuối kỳ (để thấy rõ khoản nào khách đã trả ở kỳ sau)
+  const endingItems = isDetailClosed
+    ? (detailObj.snapshot.endingDebtItems || [])
+    : computeBusinessPeriodSnapshot(detailObj).endingDebtItems;
+
+  const debtReconcileRows = endingItems.map(item => {
+    const postPayments = (db.paymentRecords || []).filter(pr => {
+      const sameTarget = (item.orderId && pr.kind === 'order' && pr.orderId === item.orderId) ||
+        (item.extraShipId && pr.kind === 'extraship' && pr.extraShipId === item.extraShipId);
+      return sameTarget && (normalizeDateStr(pr.date) || '') > detailObj.endDate;
+    });
+    const paidAfterClose = postPayments.reduce((a, pr) => a + Math.round(parseNum(pr.amount)), 0);
+    let currentRemaining = 0;
+    if (item.orderId) {
+      const ord = (db.orderNotes || []).find(o => o.id === item.orderId);
+      currentRemaining = ord ? calcOrderMetrics(ord).customerDebt : 0;
+    } else if (item.extraShipId) {
+      const ex = (db.extraShipments || []).find(x => x.id === item.extraShipId);
+      currentRemaining = ex ? Math.max(0, Math.round(parseNum(ex.amount)) - getExtraCurrentPaid(ex)) : 0;
+    }
+    return { ...item, paidAfterClose, currentRemaining, postPayments };
+  });
+
+  const totalEndingDebt = isDetailClosed ? detailStats.endingCustomerDebt : detailStats.allCustomerDebt;
+  const totalPaidAfter = debtReconcileRows.reduce((a, r) => a + r.paidAfterClose, 0);
+  const totalStillOwed = debtReconcileRows.reduce((a, r) => a + r.currentRemaining, 0);
+
+  const periodPayments = (db.paymentRecords || []).filter(p => matchesDateFilter(p.date, { startDate: detailObj.startDate, endDate: detailObj.endDate }));
+  const adjustments = Array.isArray(detailObj.adjustments) ? detailObj.adjustments : [];
+
+  return `<div class="section-stack">
+    ${topToolbar}
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">📅 Danh sách các Kỳ kinh doanh (Tự chốt 00:00 ngày 26 · ${APP_TIMEZONE})</div>
+          <div class="panel-sub">Chu kỳ cố định ngày 26 tháng này → ngày 25 tháng sau · Bộ đếm tự về 0 ngày 26 · Toàn bộ dữ liệu gốc & công nợ được bảo toàn</div>
+        </div>
+        <span class="result-count">${periods.length} kỳ lưu trữ</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Kỳ kinh doanh</th>
+              <th>Trạng thái & Thời điểm chốt</th>
+              <th>Lưu lượng đơn</th>
+              <th>Tổng thu / Tổng chi</th>
+              <th>Lợi nhuận thực tế</th>
+              <th>Công nợ cuối kỳ</th>
+              <th>Thao tác</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${periods.map(p => {
+              const isCl = p.status === 'closed' && p.snapshot;
+              const st = isCl ? p.snapshot : calcPeriodFinancials({ startDate: p.startDate, endDate: p.endDate, periodId: p.id, asOfDate: '' });
+              const endDebt = isCl ? st.endingCustomerDebt : st.allCustomerDebt;
+              const adjN = Array.isArray(p.adjustments) ? p.adjustments.length : 0;
+              const isSel = detailObj && p.id === detailObj.id;
+              return `<tr class="${isSel ? 'row-selected-period' : ''}">
+                <td data-label="Kỳ kinh doanh">
+                  <b>${esc(p.label)}</b>
+                  <div class="subline">Từ ${dateText(p.startDate)} đến ${dateText(p.endDate)}</div>
+                  ${adjN > 0 ? `<span class="biz-adj-pill" style="margin-top:4px">⚠ ${adjN} điều chỉnh sau chốt</span>` : ''}
+                </td>
+                <td data-label="Trạng thái">
+                  <span class="status ${isCl ? 's-slate' : 's-green'}">${isCl ? '🔒 Đã chốt' : '● Đang hoạt động'}</span>
+                  <div class="subline">${isCl ? esc(p.closedAt) : `Chốt 00:00 ngày ${dateText(getNextBusinessPeriod(curP).startDate)}`}</div>
+                </td>
+                <td data-label="Lưu lượng đơn">
+                  <b>${st.totalTrafficOrders || 0} đơn</b>
+                  <div class="subline">${st.orderCount || 0} Note · ${st.shipmentCount || 0} VĐ · ${st.purchaseCount || 0} MH</div>
+                </td>
+                <td data-label="Thu / Chi">
+                  <div class="income-color">Thu: <b>+${money(st.totalCollectedFromCustomer || 0)} ₫</b></div>
+                  <div class="expense-color subline">Chi: −${money(st.totalTransferredOut || 0)} ₫${st.debtRecoveryIn > 0 ? ` · Thu nợ cũ: +${shortMoney(st.debtRecoveryIn)}` : ''}</div>
+                </td>
+                <td data-label="Lợi nhuận" class="${(st.netProfit || 0) >= 0 ? 'income-color' : 'expense-color'}">
+                  <b>${(st.netProfit || 0) >= 0 ? '+' : ''}${money(st.netProfit || 0)} ₫</b>
+                </td>
+                <td data-label="Công nợ cuối kỳ">
+                  <b class="${endDebt > 0 ? 'expense-color' : 'income-color'}">${money(endDebt)} ₫</b>
+                  <div class="subline">Phát sinh kỳ này: ${money(st.periodNewCustomerDebt || 0)} ₫</div>
+                </td>
+                <td data-label="Thao tác">
+                  <div class="row-actions">
+                    <button type="button" class="iconbtn ${isSel ? 'primary-tint' : ''}" onclick="periodDetailId='${esc(p.id)}';render()">Đối chiếu</button>
+                    <button type="button" class="iconbtn" onclick="openBusinessPeriodOnDashboard('${esc(p.id)}')">Mở Dashboard</button>
+                  </div>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">🔍 Báo cáo đối chiếu chi tiết: ${esc(detailObj.label)} ${isDetailClosed ? '(Bản lưu đã chốt)' : '(Đang hoạt động)'}</div>
+          <div class="panel-sub">${isDetailClosed ? `Thời điểm chốt: ${esc(detailObj.closedAt)} · Báo cáo chốt được bảo toàn độc lập với các thanh toán phát sinh ở kỳ sau.` : 'Số liệu thời gian thực của kỳ kinh doanh hiện tại.'}</div>
+        </div>
+        <div class="row-actions">
+          <button type="button" class="btn small" onclick="openBusinessPeriodOnDashboard('${esc(detailObj.id)}')">📊 Xem Dashboard kỳ này</button>
+          ${isDetailClosed && adjustments.length > 0 && currentUserRole === 'admin' ? `<button type="button" class="btn small primary" onclick="refreshClosedPeriodSnapshotControlled('${esc(detailObj.id)}')">↻ Cập nhật báo cáo sau điều chỉnh</button>` : ''}
+        </div>
+      </div>
+
+      <div class="cashflow-grid" style="padding:14px 16px 6px">
+        <div class="cash-card">
+          <span class="cash-label">Lưu lượng đơn trong kỳ</span>
+          <strong class="cash-val">${detailStats.totalTrafficOrders || 0} đơn</strong>
+          <span class="cash-sub">${detailStats.orderCount || 0} Note đơn · ${detailStats.shipmentCount || 0} Ký gửi · ${detailStats.purchaseCount || 0} Mua hộ</span>
+        </div>
+        <div class="cash-card">
+          <span class="cash-label">Tổng dòng tiền thu trong kỳ</span>
+          <strong class="cash-val income-color">+${money(detailStats.totalCollectedFromCustomer || 0)} ₫</strong>
+          <span class="cash-sub">Thu nợ kỳ trước: +${money(detailStats.debtRecoveryIn || 0)} ₫ · Tổng chi/chuyển: −${money(detailStats.totalTransferredOut || 0)} ₫</span>
+        </div>
+        <div class="cash-card">
+          <span class="cash-label">Lợi nhuận thực tế của kỳ</span>
+          <strong class="cash-val ${(detailStats.netProfit || 0) >= 0 ? 'income-color' : 'expense-color'}">${(detailStats.netProfit || 0) >= 0 ? '+' : ''}${money(detailStats.netProfit || 0)} ₫</strong>
+          <span class="cash-sub">Cước +${shortMoney(detailStats.shipProfitTotal || 0)} · DV +${shortMoney(detailStats.totalServiceRevenue || 0)} · ĐG +${shortMoney(detailStats.packProfitTotal || 0)} · Tệ +${shortMoney(detailStats.fxProfitTotal || 0)}</span>
+        </div>
+        <div class="cash-card">
+          <span class="cash-label">${isDetailClosed ? `Công nợ chốt cuối kỳ (${dateText(detailObj.endDate)})` : 'Tổng công nợ còn phải thu'}</span>
+          <strong class="cash-val ${totalEndingDebt > 0 ? 'expense-color' : 'income-color'}">${money(totalEndingDebt)} ₫</strong>
+          <span class="cash-sub">Phát sinh kỳ này: ${money(detailStats.periodNewCustomerDebt || 0)} ₫${isDetailClosed ? ` · Đã thu sau chốt: +${money(totalPaidAfter)} ₫ · Còn nợ: ${money(totalStillOwed)} ₫` : ''}</span>
+        </div>
+      </div>
+
+      <div style="padding:10px 16px 16px">
+        <h4 style="margin:8px 0;font-size:13.5px">📋 Đối chiếu Công nợ cuối kỳ (${debtReconcileRows.length} khoản)</h4>
+        ${debtReconcileRows.length ? `<div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Khách hàng & Đơn hàng</th>
+                <th>Ngày đơn</th>
+                <th>Nợ tại thời điểm cuối kỳ</th>
+                <th>Đã thanh toán sau chốt kỳ</th>
+                <th>Còn nợ thực tế hiện tại</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${debtReconcileRows.map(r => `<tr>
+                <td data-label="Khách hàng"><b>${esc(r.customer)}</b> ${r.orderCode ? `<span class="code">${esc(r.orderCode)}</span>` : ''}<div class="subline">${esc(r.product || '')}</div></td>
+                <td data-label="Ngày đơn">${dateText(r.orderDate)}</td>
+                <td data-label="Nợ cuối kỳ" class="expense-color"><b>${money(r.debtAtClose)} ₫</b></td>
+                <td data-label="Đã thu sau kỳ" class="income-color">${r.paidAfterClose > 0 ? `<b>+${money(r.paidAfterClose)} ₫</b><div class="subline">${r.postPayments.map(pr => `${dateText(pr.date)}: +${money(pr.amount)} ₫`).join(' · ')}</div>` : '—'}</td>
+                <td data-label="Còn nợ hiện tại"><b class="${r.currentRemaining > 0 ? 'expense-color' : 'income-color'}">${r.currentRemaining > 0 ? `${money(r.currentRemaining)} ₫` : '✓ Đã thanh toán hết'}</b></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : '<div class="empty" style="padding:14px"><p>✓ Không có khoản công nợ nào tồn đọng cuối kỳ này.</p></div>'}
+
+        ${periodPayments.length ? `<h4 style="margin:16px 0 8px;font-size:13.5px">💵 Lịch sử khách thanh toán ghi nhận vào dòng tiền kỳ này (${periodPayments.length} lần)</h4>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Ngày thực thu</th><th>Khách hàng</th><th>Liên kết đơn gốc</th><th>Phân loại</th><th>Số tiền thực thu</th></tr></thead>
+            <tbody>
+              ${periodPayments.map(pr => `<tr>
+                <td data-label="Ngày thu"><b>${dateText(pr.date)}</b></td>
+                <td data-label="Khách hàng">${esc(pr.customer)} ${pr.orderCode ? `<span class="code">${esc(pr.orderCode)}</span>` : ''}</td>
+                <td data-label="Đơn gốc">Ngày đơn ${dateText(pr.originDate)} · ${esc(pr.note)}</td>
+                <td data-label="Phân loại"><span class="status ${pr.isDebtRecovery ? 's-amber' : 's-green'}">${pr.isDebtRecovery ? 'Thu công nợ kỳ trước' : 'Thu trong kỳ'}</span></td>
+                <td data-label="Số tiền" class="income-color"><b>+${money(pr.amount)} ₫</b></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+
+        ${adjustments.length ? `<h4 style="margin:16px 0 8px;font-size:13.5px;color:#b45309">⚠ Lịch sử điều chỉnh sau khi chốt kỳ (${adjustments.length})</h4>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Thời điểm</th><th>Thao tác</th><th>Mục tác động</th><th>Chi tiết</th></tr></thead>
+            <tbody>
+              ${adjustments.map(a => `<tr>
+                <td data-label="Thời điểm"><span class="ts-stamp">${esc(a.time)}</span></td>
+                <td data-label="Thao tác"><span class="code">${esc(a.action)}</span></td>
+                <td data-label="Mục tác động"><b>${esc(a.target)}</b></td>
+                <td data-label="Chi tiết">${esc(a.detail)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
+      </div>
+    </section>
+  </div>`;
+}
+
 function financePage() {
-  const prefix = getActivePeriodPrefix();
-  const s = calcPeriodFinancials(prefix);
+  const filterSpec = getActivePeriodFilter();
+  const selectedPeriodObj = periodMode === 'bizperiod' ? getSelectedBusinessPeriod() : null;
+  const s = (selectedPeriodObj && selectedPeriodObj.status === 'closed' && selectedPeriodObj.snapshot)
+    ? selectedPeriodObj.snapshot
+    : calcPeriodFinancials(filterSpec);
+  const liveAllStats = calcPeriodFinancials('');
+  const curBizP = getCurrentBusinessPeriod();
+  const curBizStats = calcPeriodFinancials({ startDate: curBizP.startDate, endDate: curBizP.endDate, periodId: curBizP.id, asOfDate: '' });
+
   const debtOrdersCount = (db.orderNotes || []).filter(o => {
     if (o.status === 'Đã hủy') return false;
     const m = calcOrderMetrics(o);
     return m.customerDebt > 0 || m.warehouseDebt > 0 || m.partnerDebt > 0;
   }).length;
+  const closedCount = (db.businessPeriods || []).filter(p => p.status === 'closed').length;
 
   const topToolbar = `<div class="toolbar-row">
     <div class="subtabs" role="tablist" aria-label="Chế độ xem tài chính">
       <button type="button" class="subtab ${financeTab === 'cashflow' ? 'active' : ''}" onclick="financeTab='cashflow';query='';window.statusFilter='';render()">💰 Thu chi & Dòng tiền</button>
-      <button type="button" class="subtab" onclick="setView('incidentals',document.querySelector('[data-view=incidentals]'))">🪵 Chi phí phát sinh & Đóng gói (4 Tab)</button>
+      <button type="button" class="subtab ${financeTab === 'periods' ? 'active' : ''}" onclick="financeTab='periods';render()">📅 Kỳ chốt 26 ${closedCount ? `<span class="subtab-badge">${closedCount}</span>` : ''}</button>
+      <button type="button" class="subtab" onclick="setView('incidentals',document.querySelector('[data-view=incidentals]'))">🪵 Chi phí phát sinh (4 Tab)</button>
       <button type="button" class="subtab ${financeTab === 'debts' ? 'active' : ''}" onclick="financeTab='debts';render()">🤝 Công nợ Khách & Kho ${debtOrdersCount ? `<span class="subtab-badge">${debtOrdersCount}</span>` : ''}</button>
-      <button type="button" class="subtab ${financeTab === 'report' ? 'active' : ''}" onclick="financeTab='report';render()">📊 Báo cáo & Biểu đồ AI</button>
-      <button type="button" class="subtab ${financeTab === 'history' ? 'active' : ''}" onclick="financeTab='history';query='';render()">🕒 Lịch sử sửa (${(db.logs || []).length})</button>
+      <button type="button" class="subtab ${financeTab === 'report' ? 'active' : ''}" onclick="financeTab='report';render()">📊 Báo cáo AI</button>
+      <button type="button" class="subtab ${financeTab === 'history' ? 'active' : ''}" onclick="financeTab='history';query='';render()">🕒 Lịch sử (${(db.logs || []).length})</button>
     </div>
-    ${financeTab !== 'debts' && financeTab !== 'history' ? renderPeriodPicker() : ''}
+    ${financeTab !== 'debts' && financeTab !== 'history' && financeTab !== 'periods' ? renderPeriodPicker() : ''}
   </div>`;
+
+  if (financeTab === 'periods') {
+    return renderBusinessPeriodsTab(topToolbar);
+  }
 
   if (financeTab === 'cashflow') {
     const data = getFinanceViewData();
     const hasFilter = Boolean(query || window.statusFilter);
+    const periodPayments = (db.paymentRecords || []).filter(p => matchesDateFilter(p.date, filterSpec));
     return `<div class="section-stack">
       ${topToolbar}
       <div class="cashflow-grid">
         <div class="cash-card">
-          <span class="cash-label">1. Tổng tiền thu từ khách (${esc(getPeriodLabel())})</span>
+          <span class="cash-label">1. Tổng tiền thu trong kỳ (${esc(getPeriodLabel(filterSpec))})</span>
           <strong class="cash-val income-color">+${money(s.totalCollectedFromCustomer)} ₫</strong>
-          <span class="cash-sub">Phát sinh phải thu (hàng+DV): ${money(s.totalBilledCustomer)} ₫ · Cước VC riêng: ${money(s.shipChargeTotal)} ₫</span>
+          <span class="cash-sub">${s.debtRecoveryIn > 0 ? `Gồm thu công nợ kỳ trước: +${money(s.debtRecoveryIn)} ₫ · ` : ''}Phát sinh phải thu kỳ này: ${money(s.totalBilledCustomer)} ₫</span>
         </div>
         <div class="cash-card">
-          <span class="cash-label">2. Tổng tiền chuyển ra (${esc(getPeriodLabel())})</span>
+          <span class="cash-label">2. Tổng tiền chi & chuyển ra (${esc(getPeriodLabel(filterSpec))})</span>
           <strong class="cash-val expense-color">−${money(s.totalTransferredOut)} ₫</strong>
-          <span class="cash-sub">Tổng cam kết vốn + kho + chi: ${money(s.orderCommittedOut)} ₫</span>
+          <span class="cash-sub">Sổ chi phát sinh: −${money(s.txOut || 0)} ₫ · Tổng cam kết vốn + kho: ${money(s.orderCommittedOut)} ₫</span>
         </div>
         <div class="cash-card">
-          <span class="cash-label">3. Tiền vận chuyển phải thanh toán cho kho</span>
-          <strong class="cash-val ${s.allWarehouseUnpaid > 0 ? 'amber-color' : ''}">${money(s.allWarehouseUnpaid)} ₫</strong>
-          <span class="cash-sub">Tổng cước gốc phát sinh kỳ này: ${money(s.shipCostTotal)} ₫</span>
+          <span class="cash-label">3. Công nợ phát sinh mới kỳ này / Tổng nợ thực tế</span>
+          <strong class="cash-val ${liveAllStats.allCustomerDebt > 0 ? 'expense-color' : 'income-color'}">${money(s.periodNewCustomerDebt || 0)} ₫ / ${money(liveAllStats.allCustomerDebt)} ₫</strong>
+          <span class="cash-sub">Cước kho chưa trả hiện tại: ${money(liveAllStats.allWarehouseUnpaid)} ₫</span>
         </div>
         <div class="cash-card">
           <span class="cash-label">4. Doanh thu phí dịch vụ & Lãi đóng gói</span>
@@ -2641,13 +3645,37 @@ function financePage() {
           <span class="cash-sub" style="color:var(--core-blue);font-weight:600">Mở Cước ship phát sinh · Hộp gỗ · Carton · Chống sốc →</span>
         </div>
         <div class="cash-card profit-highlight">
-          <span class="cash-label">6. LỢI NHUẬN THỰC TẾ (${esc(getPeriodLabel())})</span>
+          <span class="cash-label">6. LỢI NHUẬN THỰC TẾ (${esc(getPeriodLabel(filterSpec))})</span>
           <strong class="cash-val ${s.netProfit >= 0 ? 'income-color' : 'expense-color'}">${s.netProfit >= 0 ? '+' : ''}${money(s.netProfit)} ₫</strong>
           <span class="cash-sub">= Lãi cước + Phí DV + Lãi ĐG + Lãi tệ${s.txOtherIn > 0 ? ' + Thu khác' : ''} − Chi phí phát sinh</span>
         </div>
       </div>
 
-      ${renderCashflowBarChart(prefix)}
+      ${renderCashflowBarChart(filterSpec)}
+
+      ${periodPayments.length ? `<section class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">💵 Khoản thực thu từ khách & Thu hồi công nợ (${esc(getPeriodLabel(filterSpec))})</div>
+            <div class="panel-sub">Tiền khách thanh toán công nợ cũ được ghi nhận vào dòng tiền kỳ thu, liên kết chặt với đơn gốc (không cộng trùng lợi nhuận)</div>
+          </div>
+          <span class="result-count">${periodPayments.length} lần thu</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Ngày thực thu</th><th>Khách hàng</th><th>Đơn hàng gốc</th><th>Loại thu</th><th>Số tiền</th></tr></thead>
+            <tbody>
+              ${periodPayments.map(pr => `<tr>
+                <td data-label="Ngày thu"><b>${dateText(pr.date)}</b></td>
+                <td data-label="Khách hàng">${esc(pr.customer)} ${pr.orderCode ? `<span class="code">${esc(pr.orderCode)}</span>` : ''}</td>
+                <td data-label="Đơn gốc">Phát sinh ngày ${dateText(pr.originDate)} · ${esc(pr.note)}</td>
+                <td data-label="Loại"><span class="status ${pr.isDebtRecovery ? 's-amber' : 's-green'}">${pr.isDebtRecovery ? 'Thu công nợ kỳ trước' : 'Thu trong kỳ'}</span></td>
+                <td data-label="Số tiền" class="income-color"><b>+${money(pr.amount)} ₫</b></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>` : ''}
 
       <section class="panel">
         <div class="panel-head">
@@ -2685,8 +3713,10 @@ function financePage() {
           cur = { customer: o.customer, phone: o.phone, code: o.code, debt: 0, orders: [] };
           custDebtList.push(cur);
         }
+        const origP = getBusinessPeriodForDate(o.date);
+        const isOldPeriod = origP.id !== curBizP.id;
         cur.debt += m.customerDebt;
-        cur.orders.push({ id: o.id, label: o.product || o.goodsType, amount: m.customerDebt });
+        cur.orders.push({ id: o.id, label: o.product || o.goodsType, amount: m.customerDebt, date: o.date, isOldPeriod, periodShort: origP.shortLabel });
       }
     });
 
@@ -2696,14 +3726,34 @@ function financePage() {
       return m.warehouseDebt > 0 || m.partnerDebt > 0;
     });
 
+    const oldPeriodDebtOnly = Math.max(0, liveAllStats.allCustomerDebt - curBizStats.periodNewCustomerDebt);
+
     return `<div class="section-stack">
       ${topToolbar}
+      <div class="cashflow-grid">
+        <div class="cash-card">
+          <span class="cash-label">1. Công nợ phát sinh mới trong kỳ (${esc(curBizP.shortLabel)})</span>
+          <strong class="cash-val ${curBizStats.periodNewCustomerDebt > 0 ? 'amber-color' : 'income-color'}">${money(curBizStats.periodNewCustomerDebt)} ₫</strong>
+          <span class="cash-sub">Chỉ tính các khoản nợ mới phát sinh từ ngày ${dateText(curBizP.startDate)} (tự bắt đầu từ 0 mỗi ngày 26)</span>
+        </div>
+        <div class="cash-card profit-highlight">
+          <span class="cash-label">2. TỔNG CÔNG NỢ THỰC TẾ CÒN PHẢI THU (Xuyên kỳ)</span>
+          <strong class="cash-val ${liveAllStats.allCustomerDebt > 0 ? 'expense-color' : 'income-color'}">${money(liveAllStats.allCustomerDebt)} ₫</strong>
+          <span class="cash-sub">Bao gồm nợ kỳ trước chuyển sang: <b>${money(oldPeriodDebtOnly)} ₫</b> + phát sinh kỳ này: <b>${money(curBizStats.periodNewCustomerDebt)} ₫</b></span>
+        </div>
+        <div class="cash-card">
+          <span class="cash-label">3. Tiền khách đã trả nợ cũ trong kỳ này</span>
+          <strong class="cash-val income-color">+${money(curBizStats.debtRecoveryIn)} ₫</strong>
+          <span class="cash-sub">Được hạch toán vào dòng tiền thu của ${esc(curBizP.shortLabel)} · Giữ nguyên báo cáo kỳ cũ</span>
+        </div>
+      </div>
+
       <div class="debt-grid">
         <section class="panel">
           <div class="panel-head">
             <div>
-              <div class="panel-title">📥 Công nợ Khách hàng (Phải thu)</div>
-              <div class="panel-sub">Tổng tiền khách còn nợ: <b class="expense-color">${money(s.allCustomerDebt)} ₫</b></div>
+              <div class="panel-title">📥 Công nợ Khách hàng (Bảo toàn xuyên kỳ)</div>
+              <div class="panel-sub">Tổng tiền khách còn nợ thực tế: <b class="expense-color">${money(liveAllStats.allCustomerDebt)} ₫</b></div>
             </div>
           </div>
           ${custDebtList.length ? custDebtList.map(c => `<div class="todo-row">
@@ -2711,7 +3761,7 @@ function financePage() {
               <div class="mini-avatar">${avatar(c.customer)}</div>
               <div class="todo-info">
                 <div class="todo-title">${esc(c.customer)} ${c.phone ? `<span class="code">${esc(c.phone)}</span>` : ''}</div>
-                <div class="todo-meta">${c.orders.map(x => `${esc(x.label)} (${money(x.amount)} ₫)`).join(' · ')}</div>
+                <div class="todo-meta">${c.orders.map(x => `${esc(x.label)} (${money(x.amount)} ₫ · ${x.isOldPeriod ? `<b class="amber-color">Nợ kỳ trước ${dateText(x.date)}</b>` : `Kỳ này ${dateText(x.date)}`})`).join(' · ')}</div>
               </div>
             </div>
             <div class="todo-right">
@@ -2728,7 +3778,7 @@ function financePage() {
           <div class="panel-head">
             <div>
               <div class="panel-title">📤 Quản lý Đã Trả Cước Kho (Phải trả)</div>
-              <div class="panel-sub">Tổng cước kho chưa thanh toán: <b class="amber-color">${money(s.allWarehouseUnpaid)} ₫</b></div>
+              <div class="panel-sub">Tổng cước kho chưa thanh toán: <b class="amber-color">${money(liveAllStats.allWarehouseUnpaid)} ₫</b></div>
             </div>
           </div>
           ${partnerDebts.length ? partnerDebts.map(o => {
@@ -2737,7 +3787,7 @@ function financePage() {
               <div class="todo-info">
                 <div class="todo-title">${esc(o.product || o.goodsType)} <span class="code">Khách: ${esc(o.customer)}</span></div>
                 <div class="todo-meta">
-                  ${m.warehouseDebt > 0 ? `Cước kho chưa trả: <b class="amber-color">${money(m.warehouseDebt)} ₫</b> ` : ''}
+                  ${m.warehouseDebt > 0 ? `Cước kho chưa trả: <b class="amber-color">${money(m.warehouseDebt)} ₫</b> · Ngày đơn ${dateText(o.date)}` : ''}
                 </div>
               </div>
               <div class="todo-right">
@@ -2752,10 +3802,9 @@ function financePage() {
   }
 
   if (financeTab === 'report') {
-    const monthPrefix = periodMode === 'month' ? periodMonth : dateKey().slice(0, 7);
-    const monthStats = calcPeriodFinancials(monthPrefix);
-    const dailyRows = getDailyBreakdown(prefix);
-    const insights = buildAiInsights(s);
+    const dailyRows = getDailyBreakdown(filterSpec);
+    const insights = buildAiInsights(s, filterSpec);
+    const label = getPeriodLabel(filterSpec);
 
     const sumOrders = dailyRows.reduce((a, r) => a + r.orders, 0);
     const sumCollected = dailyRows.reduce((a, r) => a + r.collected, 0);
@@ -2767,7 +3816,7 @@ function financePage() {
     return `<div class="section-stack">
       ${topToolbar}
       <div class="ai-banner">
-        <div class="ai-banner-title">🤖 AI Tự Động Tính Toán & Phân Tích Dòng Tiền</div>
+        <div class="ai-banner-title">🤖 AI Tự Động Tính Toán & Phân Tích Dòng Tiền (${esc(label)})</div>
         <ul class="ai-banner-list">
           ${insights.map(line => `<li>${line}</li>`).join('')}
         </ul>
@@ -2775,25 +3824,25 @@ function financePage() {
 
       <div class="cashflow-grid">
         <div class="cash-card">
-          <span class="cash-label">Tổng phí vận chuyển thu khách (${monthPrefix})</span>
-          <strong class="cash-val blue-color">${money(monthStats.shipChargeTotal)} ₫</strong>
-          <span class="cash-sub">Cước gốc kho: ${money(monthStats.shipCostTotal)} ₫ · Lãi cước: +${money(monthStats.shipProfitTotal)} ₫</span>
+          <span class="cash-label">Tổng phí vận chuyển thu khách (${esc(label)})</span>
+          <strong class="cash-val blue-color">${money(s.shipChargeTotal)} ₫</strong>
+          <span class="cash-sub">Cước gốc kho: ${money(s.shipCostTotal)} ₫ · Lãi cước: +${money(s.shipProfitTotal)} ₫</span>
         </div>
         <div class="cash-card">
-          <span class="cash-label">Tổng phí dịch vụ (${esc(getPeriodLabel())})</span>
+          <span class="cash-label">Tổng phí dịch vụ (${esc(label)})</span>
           <strong class="cash-val income-color">+${money(s.totalServiceRevenue)} ₫</strong>
-          <span class="cash-sub">Lãi chênh lệch tỷ giá tệ: +${money(s.fxProfitTotal)} ₫</span>
+          <span class="cash-sub">Lãi đóng gói: +${money(s.packProfitTotal || 0)} ₫ · Lãi tỷ giá tệ: +${money(s.fxProfitTotal)} ₫</span>
         </div>
         <div class="cash-card">
-          <span class="cash-label">Tổng chi phí phát sinh (${esc(getPeriodLabel())})</span>
+          <span class="cash-label">Tổng chi phí phát sinh (${esc(label)})</span>
           <strong class="cash-val expense-color">−${money(s.totalIncidentalExpense)} ₫</strong>
-          <span class="cash-sub">Lợi nhuận ròng: <b class="${s.netProfit >= 0 ? 'income-color' : 'expense-color'}">${s.netProfit >= 0 ? '+' : ''}${money(s.netProfit)} ₫</b></span>
+          <span class="cash-sub">Lợi nhuận ròng kỳ này: <b class="${s.netProfit >= 0 ? 'income-color' : 'expense-color'}">${s.netProfit >= 0 ? '+' : ''}${money(s.netProfit)} ₫</b></span>
         </div>
       </div>
 
       <div class="visual-grid">
-        ${renderProfitDonutChart(s, getPeriodLabel())}
-        ${renderGoodsCategoryChart(prefix)}
+        ${renderProfitDonutChart(s, label)}
+        ${renderGoodsCategoryChart(filterSpec)}
       </div>
 
       <section class="panel">
@@ -4037,6 +5086,28 @@ function saveRecord(e) {
     item.history.unshift({ time: stampFull, action: prev ? 'Chỉnh sửa' : 'Tạo mới', detail });
     addAuditLog(prev ? 'Sửa cước ship phát sinh' : 'Thêm cước ship phát sinh', `${item.customer} (${item.orderCode})`, detail);
 
+    const prevPaid = prev ? getExtraCurrentPaid(prev) : 0;
+    const nextPaid = getExtraCurrentPaid(item);
+    if (!prev && nextPaid > 0) {
+      recordPaymentEvent({
+        kind: 'extraship', extraShipId: item.id, orderId: item.orderId, orderCode: item.orderCode,
+        customer: item.customer, amount: nextPaid, date: item.date, originDate: item.date,
+        note: `Thu cước ship PS: ${item.content}`
+      });
+    } else if (prev && nextPaid > prevPaid) {
+      recordPaymentEvent({
+        kind: 'extraship', extraShipId: item.id, orderId: item.orderId, orderCode: item.orderCode,
+        customer: item.customer, amount: nextPaid - prevPaid, date: dateKey(), originDate: item.date,
+        note: `Thu thêm cước ship PS: ${item.content}`
+      });
+    } else if (prev && nextPaid < prevPaid) {
+      reducePaymentEvents('extraship', item.id, prevPaid - nextPaid);
+    }
+
+    if (!prev || prev.amount !== item.amount || prev.date !== item.date || prev.content !== item.content) {
+      recordClosedPeriodAdjustment(item.date, prev ? 'Sửa cước ship PS kỳ đã chốt' : 'Bổ sung cước ship PS vào kỳ đã chốt', `${item.customer} (${item.orderCode})`, detail);
+    }
+
     db.extraShipments = prev ? db.extraShipments.map(x => x.id === id ? item : x) : [item, ...db.extraShipments];
     if (!persist()) return;
     closeModal();
@@ -4083,6 +5154,7 @@ function saveRecord(e) {
     const detail = `Giá nhập ${money(item.costPrice)} ₫ · Giá bán ${money(item.sellPrice)} ₫ · Lãi ĐV +${money(unitProf)} ₫ · SL ${numFmt(item.qty)}`;
     item.history.unshift({ time: stampFull, action: prev ? 'Chỉnh sửa' : 'Tạo mới', detail });
     addAuditLog(prev ? 'Sửa SP đóng gói' : 'Thêm SP đóng gói', item.name, detail);
+    recordClosedPeriodAdjustment(item.date, prev ? 'Sửa vật tư đóng gói kỳ đã chốt' : 'Thêm vật tư đóng gói vào kỳ đã chốt', item.name, detail);
 
     db.packagingCatalog = prev ? db.packagingCatalog.map(x => x.id === id ? item : x) : [item, ...db.packagingCatalog];
     incTab = category;
@@ -4114,6 +5186,7 @@ function saveRecord(e) {
       waybill: draft.waybill || prev?.waybill || '',
       sourcePurchaseId: draft.sourcePurchaseId || prev?.sourcePurchaseId || '',
       sourceShipmentId: draft.sourceShipmentId || prev?.sourceShipmentId || '',
+      warehousePaidDate: (!prev?.warehousePaid && draft.warehousePaid) ? (prev ? dateKey() : (draft.date || dateKey())) : (draft.warehousePaid ? (prev?.warehousePaidDate || '') : ''),
       note: stampedNote,
       updatedAt: stamp,
       updatedAtMs: nowMs,
@@ -4122,6 +5195,35 @@ function saveRecord(e) {
     const changeDesc = describeOrderChanges(prev, item);
     item.history.unshift({ time: stampFull, action: prev ? 'Chỉnh sửa' : 'Tạo mới', detail: changeDesc });
     addAuditLog(prev ? 'Sửa Note đơn' : 'Thêm Note đơn', `${item.customer} · ${item.product || item.goodsType}`, changeDesc);
+
+    const prevPaid = prev ? Math.round(parseNum(prev.customerPaid)) : 0;
+    const nextPaid = Math.round(parseNum(item.customerPaid));
+    if (!prev && nextPaid > 0) {
+      recordPaymentEvent({
+        kind: 'order', orderId: item.id, orderCode: item.code, customer: item.customer,
+        amount: nextPaid, date: item.date, originDate: item.date,
+        note: `Thanh toán lúc tạo đơn ${item.product || item.goodsType || ''}`
+      });
+    } else if (prev && nextPaid > prevPaid) {
+      recordPaymentEvent({
+        kind: 'order', orderId: item.id, orderCode: item.code, customer: item.customer,
+        amount: nextPaid - prevPaid, date: dateKey(), originDate: item.date,
+        note: `Khách thanh toán thêm đơn ${item.product || item.goodsType || item.code || ''}`
+      });
+    } else if (prev && nextPaid < prevPaid) {
+      reducePaymentEvents('order', item.id, prevPaid - nextPaid);
+    }
+
+    const financialEdited = !prev ||
+      prev.shipCost !== item.shipCost || prev.shipCharge !== item.shipCharge ||
+      prev.packCost !== item.packCost || prev.packCharge !== item.packCharge ||
+      prev.goodsCny !== item.goodsCny || prev.goodsVndInput !== item.goodsVndInput ||
+      prev.rateBuy !== item.rateBuy || prev.rateSell !== item.rateSell ||
+      prev.serviceFeePct !== item.serviceFeePct || prev.serviceFeeManual !== item.serviceFeeManual ||
+      prev.extraCost !== item.extraCost || prev.date !== item.date;
+    if (financialEdited) {
+      recordClosedPeriodAdjustment(item.date, prev ? 'Sửa số liệu Note đơn kỳ đã chốt' : 'Bổ sung Note đơn vào kỳ đã chốt', `${item.customer} (${item.code})`, changeDesc);
+    }
 
     db.orderNotes = prev ? db.orderNotes.map(x => x.id === id ? item : x) : [item, ...db.orderNotes];
     if (!persist()) return;
@@ -4157,6 +5259,7 @@ function saveRecord(e) {
     const detail = `${item.type} ${money(item.amount)} ₫ (${item.category})${item.party ? ' · ' + item.party : ''}`;
     item.history.unshift({ time: stampFull, action: prev ? 'Chỉnh sửa' : 'Ghi mới', detail });
     addAuditLog(prev ? 'Sửa thu chi' : 'Ghi thu chi', item.category, detail);
+    recordClosedPeriodAdjustment(item.date, prev ? 'Sửa giao dịch kỳ đã chốt' : 'Bổ sung giao dịch vào kỳ đã chốt', item.category, detail);
 
     db.transactions = prev ? db.transactions.map(x => x.id === id ? item : x) : [item, ...(db.transactions || [])];
     if (!persist()) return;
@@ -4262,6 +5365,7 @@ function deleteRecord(confirmedInline = false) {
     'transactions';
   const target = (db[key] || []).find(x => x.id === id);
   saveAutoSnapshot(`Trước khi xóa ${target?.customer || target?.name || id}`, true);
+  if (target?.date) recordClosedPeriodAdjustment(target.date, 'Xóa bản ghi kỳ đã chốt', target?.customer || target?.name || target?.category || id, `Đã xóa ${target?.product || target?.name || target?.content || target?.category || id}`);
   markDeletedId(id);
   db[key] = (db[key] || []).filter(x => x.id !== id);
   addAuditLog('Xóa bản ghi', target?.customer || target?.name || target?.category || 'Bản ghi', `Đã xóa ${target?.product || target?.name || target?.content || target?.category || id}`);
@@ -4281,6 +5385,7 @@ function deleteItemDirect(kind, id) {
     `yêu cầu mua hộ "${item.product}"`;
   if (!confirm(`Bạn có chắc muốn xóa ${label} của khách ${item.customer}?`)) return;
   saveAutoSnapshot(`Trước khi xóa ${item.customer}`, true);
+  if (item?.date) recordClosedPeriodAdjustment(item.date, 'Xóa bản ghi kỳ đã chốt', item.customer, `Đã xóa ${label}`);
   markDeletedId(id);
   db[key] = db[key].filter(x => x.id !== id);
   addAuditLog('Xóa bản ghi', `${item.customer}`, `Đã xóa ${label}`);
@@ -4294,6 +5399,7 @@ function deleteTransaction(id) {
   const desc = item ? `${item.type} ${money(item.amount)} ₫ (${item.category})` : 'khoản thu chi này';
   if (!confirm(`Xóa ${desc}?`)) return;
   saveAutoSnapshot(`Trước khi xóa thu chi`, true);
+  if (item?.date) recordClosedPeriodAdjustment(item.date, 'Xóa thu chi kỳ đã chốt', item?.category || 'Thu chi', `Đã xóa ${desc}`);
   markDeletedId(id);
   db.transactions = db.transactions.filter(x => x.id !== id);
   addAuditLog('Xóa thu chi', item?.category || 'Thu chi', `Đã xóa ${desc}`);
@@ -4337,12 +5443,15 @@ function importData(e, mergeMode = false) {
         extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
         packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
         logs: Array.isArray(d.logs) ? d.logs : [],
+        paymentRecords: Array.isArray(d.paymentRecords) ? d.paymentRecords : [],
+        businessPeriods: Array.isArray(d.businessPeriods) ? d.businessPeriods : [],
         deletedIds: (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {}
       };
       if (mergeMode) {
         if (confirm(`Gộp thêm an toàn ${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn, ${nextDb.purchases.length} đơn mua hộ từ tệp JSON? Dữ liệu hiện tại KHÔNG bị xóa.`)) {
           saveAutoSnapshot('Trước khi gộp tệp JSON', true);
           db = smartMergeDB(db, nextDb, { ignoreDeletes: true });
+          reconcileBusinessPeriods(undefined, { skipPersist: true, silent: true });
           addAuditLog('Gộp dữ liệu JSON', 'Hệ thống', `Gộp an toàn tệp JSON (${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn)`);
           persist();
           render();
@@ -4352,6 +5461,7 @@ function importData(e, mergeMode = false) {
         if (confirm(`Khôi phục ${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn, ${nextDb.purchases.length} đơn mua hộ và ${nextDb.transactions.length} giao dịch?\n\nHệ thống sẽ tự động chụp 1 bản dự phòng dữ liệu hiện tại trước khi khôi phục.`)) {
           saveAutoSnapshot('Trước khi khôi phục tệp JSON', true);
           db = nextDb;
+          reconcileBusinessPeriods(undefined, { skipPersist: true, silent: true });
           addAuditLog('Khôi phục dữ liệu', 'Hệ thống', `Nhập tệp JSON (${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn)`);
           persist();
           render();
@@ -4370,11 +5480,6 @@ function importData(e, mergeMode = false) {
    HỆ THỐNG ĐỒNG BỘ 2 CHIỀU (FIREBASE REST) & CHỐNG MẤT DỮ LIỆU
    Nguyên tắc: KHÔNG BAO GIỜ tự xóa dữ liệu người dùng.
    ============================================================ */
-let syncDebounceTimer = null;
-let syncPollTimer = null;
-let syncInFlight = false;
-let lastAutoSnapTs = 0;
-
 function markDeletedId(id) {
   if (!id) return;
   if (!db.deletedIds || typeof db.deletedIds !== 'object') db.deletedIds = {};
@@ -4495,8 +5600,11 @@ function restoreAutoSnapshot(snapId) {
     extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
     packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
     logs: Array.isArray(d.logs) ? d.logs : [],
+    paymentRecords: Array.isArray(d.paymentRecords) ? d.paymentRecords : [],
+    businessPeriods: Array.isArray(d.businessPeriods) ? d.businessPeriods : [],
     deletedIds: (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {}
   };
+  reconcileBusinessPeriods(undefined, { skipPersist: true, silent: true });
   addAuditLog('Khôi phục mốc dự phòng', 'Hệ thống', `Khôi phục về mốc ${target.time} (${target.reason})`);
   persist({ skipSnapshot: true });
   render();
@@ -4539,6 +5647,8 @@ function normalizeIncomingDB(raw) {
     extraShipments: toArr(raw.extraShipments),
     packagingCatalog: toArr(raw.packagingCatalog),
     logs: toArr(raw.logs),
+    paymentRecords: toArr(raw.paymentRecords),
+    businessPeriods: toArr(raw.businessPeriods),
     deletedIds: (raw.deletedIds && typeof raw.deletedIds === 'object') ? { ...raw.deletedIds } : {}
   };
 }
@@ -4561,6 +5671,8 @@ function smartMergeDB(localDb, remoteRaw, opts = {}) {
       extraShipments: remoteDb.extraShipments,
       packagingCatalog: remoteDb.packagingCatalog.length ? remoteDb.packagingCatalog : samplePackagingCatalog(),
       logs: remoteDb.logs.slice(0, 300),
+      paymentRecords: remoteDb.paymentRecords,
+      businessPeriods: remoteDb.businessPeriods,
       deletedIds: remoteDb.deletedIds || {}
     };
   }
@@ -4602,6 +5714,24 @@ function smartMergeDB(localDb, remoteRaw, opts = {}) {
     return Array.from(map.values()).map(v => v.item);
   };
 
+  // Gộp kỳ kinh doanh: ưu tiên bản đã chốt (closed + snapshot) để bảo toàn lịch sử đồng nhất giữa nhiều máy
+  const mergePeriods = (localArr = [], remoteArr = []) => {
+    const map = new Map();
+    const put = p => {
+      if (!p || !p.id) return;
+      const ex = map.get(p.id);
+      if (!ex) { map.set(p.id, p); return; }
+      const pClosed = p.status === 'closed' && p.snapshot;
+      const exClosed = ex.status === 'closed' && ex.snapshot;
+      if (pClosed && !exClosed) { map.set(p.id, p); return; }
+      if (!pClosed && exClosed) return;
+      if ((Number(p.updatedAtMs) || 0) >= (Number(ex.updatedAtMs) || 0)) map.set(p.id, p);
+    };
+    (localArr || []).forEach(put);
+    (remoteArr || []).forEach(put);
+    return [...map.values()].sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+  };
+
   const mergedLogs = mergeList(localDb.logs, remoteDb.logs).slice(0, 300);
   const mergedPack = mergeList(localDb.packagingCatalog, remoteDb.packagingCatalog);
 
@@ -4613,6 +5743,8 @@ function smartMergeDB(localDb, remoteRaw, opts = {}) {
     extraShipments: mergeList(localDb.extraShipments, remoteDb.extraShipments),
     packagingCatalog: mergedPack.length ? mergedPack : samplePackagingCatalog(),
     logs: mergedLogs,
+    paymentRecords: mergeList(localDb.paymentRecords, remoteDb.paymentRecords),
+    businessPeriods: mergePeriods(localDb.businessPeriods, remoteDb.businessPeriods),
     deletedIds: mergedDeleted
   };
 }
@@ -4692,7 +5824,8 @@ async function syncNow(silent = false) {
     if (afterStr !== beforeStr) {
       saveAutoSnapshot('Trước khi nhận dữ liệu đồng bộ từ mây', false);
       db = merged;
-      localStorage.setItem(KEY, afterStr);
+      reconcileBusinessPeriods(undefined, { skipPersist: true, silent: true });
+      localStorage.setItem(KEY, JSON.stringify(db));
       render();
     }
 
@@ -4959,6 +6092,11 @@ window.addEventListener('online', () => {
 
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
+    const res = reconcileBusinessPeriods();
+    if (res.newlyClosed.length > 0 || res.periodRolledOver) {
+      render();
+      toast(`📅 Đã tự động chốt kỳ và bắt đầu ${res.currentPeriod.label} từ 0!`);
+    }
     const cfg = loadSyncConfig();
     if (cleanFirebaseUrl(cfg.url) && cfg.autoSync) syncNow(true);
   }
@@ -4983,9 +6121,20 @@ if (localStorage.getItem(THEME_KEY) === 'purple') {
 
 document.getElementById('today').textContent = 'LOGISTICS · WMS & OMS';
 
+// Sao lưu an toàn 1 lần trước khi kích hoạt cơ chế Chốt kỳ ngày 26 (phương án khôi phục)
+try {
+  if (!localStorage.getItem('dairycow-bizperiod-v1-backup')) {
+    saveAutoSnapshot('Sao lưu an toàn trước khi kích hoạt Chốt kỳ ngày 26', true);
+    localStorage.setItem('dairycow-bizperiod-v1-backup', nowStamp(true));
+  }
+} catch {}
+
+// Tự động xác định kỳ kinh doanh hiện tại (Asia/Ho_Chi_Minh) & chốt các kỳ đã qua 00:00 ngày 26
+reconcileBusinessPeriods();
 render();
 updateSyncBadge();
 startCloudSyncLoop();
+startPeriodCloseWatcher();
 if (!applySyncLinkFromUrl()) {
   const _initSyncCfg = loadSyncConfig();
   if (cleanFirebaseUrl(_initSyncCfg.url) && _initSyncCfg.autoSync) {

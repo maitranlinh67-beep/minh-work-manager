@@ -2957,3 +2957,119 @@ button.save-status:hover {
   color: var(--muted);
   padding: 10px 0;
 }
+
+/* Thanh chọn & hiển thị Kỳ kinh doanh chốt ngày 26 (Asia/Ho_Chi_Minh) */
+.biz-period-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 13px 16px;
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+.biz-period-banner.is-active {
+  border-left: 4px solid #10b981;
+  background: linear-gradient(90deg, #f0fdf4 0%, #ffffff 34%);
+}
+.biz-period-banner.is-closed {
+  border-left: 4px solid #64748b;
+  background: linear-gradient(90deg, #f1f5f9 0%, #ffffff 34%);
+}
+.biz-period-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 240px;
+  flex: 1;
+}
+.biz-period-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 14.5px;
+  color: var(--text);
+}
+.biz-period-sub {
+  font-size: 12.2px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.biz-status-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+}
+.biz-status-pill.active {
+  background: #dcfce7;
+  color: #15803d;
+}
+.biz-status-pill.closed {
+  background: #e2e8f0;
+  color: #334155;
+}
+.biz-adj-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde68a;
+}
+.biz-period-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.biz-period-select-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.biz-period-select {
+  min-width: 230px;
+  font-weight: 600;
+}
+.traffic-empty-zero {
+  padding: 34px 20px;
+  text-align: center;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.traffic-empty-zero strong {
+  display: block;
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.traffic-empty-zero p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+tr.row-selected-period {
+  background: #eff6ff !important;
+}
+.status.s-slate {
+  background: #e2e8f0;
+  color: #334155;
+}
+.status.s-amber {
+  background: #fef3c7;
+  color: #b45309;
+}
