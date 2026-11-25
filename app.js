@@ -284,28 +284,54 @@ function sampleOrderNotes() {
   ];
 }
 
+function filterOutDeleted(arr, delMap) {
+  if (!Array.isArray(arr)) return [];
+  if (!delMap || typeof delMap !== 'object') return arr;
+  return arr.filter(item => {
+    if (!item || !item.id) return false;
+    const delTs = Number(delMap[item.id]) || 0;
+    if (!delTs) return true;
+    const itemTs = Number(item.updatedAtMs) || 0;
+    return itemTs > delTs;
+  });
+}
+
+function resolvePackagingCatalog(rawCatalog, delMap, catalogInitialized = false) {
+  if (Array.isArray(rawCatalog)) {
+    return filterOutDeleted(rawCatalog, delMap);
+  }
+  if (catalogInitialized) {
+    return [];
+  }
+  return filterOutDeleted(samplePackagingCatalog(), delMap);
+}
+
 function loadDB() {
   try {
     const saved = localStorage.getItem(KEY) || localStorage.getItem('linh-logistics-v1-data');
     if (saved) {
       const d = JSON.parse(saved);
+      const delMap = (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {};
+      const catInit = Boolean(d._catalogInitialized || Array.isArray(d.packagingCatalog) || Object.keys(delMap).some(k => k.startsWith('pk_')));
       return {
-        orderNotes: Array.isArray(d.orderNotes) ? d.orderNotes : [],
-        shipments: Array.isArray(d.shipments) ? d.shipments : [],
-        purchases: Array.isArray(d.purchases) ? d.purchases : [],
-        transactions: Array.isArray(d.transactions) ? d.transactions : [],
-        extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
-        packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
+        orderNotes: filterOutDeleted(d.orderNotes, delMap),
+        shipments: filterOutDeleted(d.shipments, delMap),
+        purchases: filterOutDeleted(d.purchases, delMap),
+        transactions: filterOutDeleted(d.transactions, delMap),
+        extraShipments: filterOutDeleted(d.extraShipments, delMap),
+        packagingCatalog: resolvePackagingCatalog(d.packagingCatalog, delMap, catInit),
         logs: Array.isArray(d.logs) ? d.logs : [],
-        paymentRecords: Array.isArray(d.paymentRecords) ? d.paymentRecords : [],
+        paymentRecords: filterOutDeleted(d.paymentRecords, delMap),
         businessPeriods: Array.isArray(d.businessPeriods) ? d.businessPeriods : [],
-        deletedIds: (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {}
+        deletedIds: delMap,
+        _catalogInitialized: true,
+        _userModified: Boolean(d._userModified || Object.keys(delMap).length > 0)
       };
     }
     const old = localStorage.getItem('linh-logistics-orders-v1');
     if (old) {
       const arr = JSON.parse(old);
-      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], extraShipments: [], packagingCatalog: samplePackagingCatalog(), logs: [], paymentRecords: [], businessPeriods: [], deletedIds: {} };
+      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], extraShipments: [], packagingCatalog: samplePackagingCatalog(), logs: [], paymentRecords: [], businessPeriods: [], deletedIds: {}, _catalogInitialized: true, _userModified: true };
     }
   } catch (err) {
     console.error('Lỗi đọc dữ liệu localStorage:', err);
@@ -332,7 +358,9 @@ function loadDB() {
     ],
     paymentRecords: [],
     businessPeriods: [],
-    deletedIds: {}
+    deletedIds: {},
+    _catalogInitialized: true,
+    _userModified: false
   };
 }
 
@@ -341,6 +369,8 @@ function persist(options = {}) {
     if (!db.deletedIds || typeof db.deletedIds !== 'object') db.deletedIds = {};
     if (!Array.isArray(db.paymentRecords)) db.paymentRecords = [];
     if (!Array.isArray(db.businessPeriods)) db.businessPeriods = [];
+    db._catalogInitialized = true;
+    if (!options.preserveSeedFlag) db._userModified = true;
     const payload = JSON.stringify(db);
     localStorage.setItem(KEY, payload);
     const verify = localStorage.getItem(KEY);
@@ -385,7 +415,7 @@ if (!localStorage.getItem(KEY)) {
       if (seedIds.includes(x.id) && (!x.history || !x.history.length)) x.qty = 0;
     });
     localStorage.setItem('dairycow-seedfix-v1', '1');
-    persist();
+    persist({ preserveSeedFlag: true });
   } catch {}
 })();
 
@@ -676,16 +706,40 @@ function getCurrentBusinessPeriod(nowInput) {
   return getBusinessPeriodForDate(getVNParts(nowInput).dateStr);
 }
 
+function getValidPaymentRecords() {
+  const del = db.deletedIds || {};
+  return (db.paymentRecords || []).filter(p => {
+    if (!p || !p.id) return false;
+    if (del[p.id]) return false;
+    if (p.kind === 'order' && p.orderId && del[p.orderId]) return false;
+    if (p.kind === 'extraship' && p.extraShipId && del[p.extraShipId]) return false;
+    return true;
+  });
+}
+
+function purgePaymentsForDeletedRecord(kind, targetId) {
+  if (!targetId || !Array.isArray(db.paymentRecords)) return;
+  db.paymentRecords = db.paymentRecords.filter(p => {
+    const match = (kind === 'order' && p.orderId === targetId) ||
+      (kind === 'extraship' && p.extraShipId === targetId);
+    if (match) {
+      markDeletedId(p.id);
+      return false;
+    }
+    return true;
+  });
+}
+
 function getOrderRecordedPaid(orderId, maxDate = '') {
   if (!orderId) return 0;
-  return (db.paymentRecords || [])
+  return getValidPaymentRecords()
     .filter(p => p.kind === 'order' && p.orderId === orderId && (!maxDate || (normalizeDateStr(p.date) || '') <= maxDate))
     .reduce((sum, p) => sum + Math.max(0, Math.round(parseNum(p.amount))), 0);
 }
 
 function getExtraRecordedPaid(extraShipId, maxDate = '') {
   if (!extraShipId) return 0;
-  return (db.paymentRecords || [])
+  return getValidPaymentRecords()
     .filter(p => p.kind === 'extraship' && p.extraShipId === extraShipId && (!maxDate || (normalizeDateStr(p.date) || '') <= maxDate))
     .reduce((sum, p) => sum + Math.max(0, Math.round(parseNum(p.amount))), 0);
 }
@@ -1091,7 +1145,7 @@ function calcPeriodFinancials(filterSpec = '') {
   const purchasesInPeriod = (db.purchases || []).filter(p => matchDate(p.date));
   const extraShipsInPeriod = (db.extraShipments || []).filter(x => matchDate(x.date));
   const txs = (db.transactions || []).filter(x => matchDate(x.date));
-  const paymentsInPeriod = (db.paymentRecords || []).filter(p => matchDate(p.date));
+  const paymentsInPeriod = getValidPaymentRecords().filter(p => matchDate(p.date));
 
   let orderBilledCustomer = 0;
   let legacyOrderCollected = 0;
@@ -1375,7 +1429,7 @@ function renderTrafficChartCard(s, periodLabel, filterSpec = null) {
   });
 
   // Cộng tiền khách thanh toán (kể cả công nợ kỳ cũ) vào đúng ngày thực thu — KHÔNG cộng trùng lợi nhuận
-  (db.paymentRecords || []).filter(p => matchDate(p.date)).forEach(p => {
+  getValidPaymentRecords().filter(p => matchDate(p.date)).forEach(p => {
     const amt = Math.max(0, Math.round(parseNum(p.amount)));
     if (amt > 0) ensure(getKey(p.date)).moneyIn += amt;
   });
@@ -1678,7 +1732,7 @@ function renderCashflowBarChart(filterSpec = '') {
     if (lp > 0) ensure(getKey(x.date)).moneyIn += lp;
   });
 
-  (db.paymentRecords || []).filter(p => matchDate(p.date)).forEach(p => {
+  getValidPaymentRecords().filter(p => matchDate(p.date)).forEach(p => {
     const amt = Math.max(0, Math.round(parseNum(p.amount)));
     if (amt > 0) ensure(getKey(p.date)).moneyIn += amt;
   });
@@ -2236,6 +2290,8 @@ function openRoleModal() {
       </div>
     </div>
   `;
+  const saveBtnEl = document.getElementById('saveBtn');
+  if (saveBtnEl) saveBtnEl.textContent = '✓ Đóng';
   document.getElementById('modal').classList.add('open');
 }
 
@@ -2999,10 +3055,33 @@ function getPackagingTabViewData(cat) {
       <div class="empty-ico">🪵</div>
       <strong>Chưa có sản phẩm trong mục ${esc(catNames[cat] || '')}</strong>
       <p>Nhấn nút bên dưới để thêm sản phẩm đóng gói và tự động tính giá vốn, doanh thu, lợi nhuận.</p>
-      <button type="button" class="btn small primary" onclick="openNewPackItem('${cat}')">＋ Thêm sản phẩm ${esc(catNames[cat] || '')}</button>
+      <div class="row-actions" style="justify-content:center">
+        <button type="button" class="btn small primary" onclick="openNewPackItem('${cat}')">＋ Thêm sản phẩm ${esc(catNames[cat] || '')}</button>
+        <button type="button" class="btn small" onclick="restoreSamplePackCategory('${cat}')">↺ Khôi phục mẫu ${esc(catNames[cat] || '')}</button>
+      </div>
     </div>`);
 
   return { totalCount: all.length, filteredCount: filtered.length, tableHtml };
+}
+
+function restoreSamplePackCategory(cat) {
+  const samples = samplePackagingCatalog().filter(x => x.category === cat).map(x => ({
+    ...x,
+    qty: 0,
+    updatedAt: nowStamp(),
+    updatedAtMs: Date.now()
+  }));
+  if (!samples.length) return;
+  if (!Array.isArray(db.packagingCatalog)) db.packagingCatalog = [];
+  samples.forEach(s => {
+    if (db.deletedIds) delete db.deletedIds[s.id];
+    if (!db.packagingCatalog.some(ex => ex.id === s.id)) {
+      db.packagingCatalog.push(s);
+    }
+  });
+  persist();
+  render();
+  toast('✓ Đã thêm lại mẫu bảng giá đóng gói');
 }
 
 function stepPackQty(id, delta) {
@@ -3010,6 +3089,7 @@ function stepPackQty(id, delta) {
   if (!item) return;
   item.qty = Math.max(0, parseNum(item.qty) + delta);
   item.updatedAt = nowStamp();
+  item.updatedAtMs = Date.now();
   persist();
   render();
 }
@@ -3050,6 +3130,7 @@ function deleteExtraShip(id) {
   saveAutoSnapshot(`Trước khi xóa cước ship ${item.orderCode || ''}`, true);
   recordClosedPeriodAdjustment(item.date, 'Xóa cước ship PS kỳ đã chốt', item.customer || item.orderCode || 'Cước ship', `Đã xóa ${item.content || ''} (${money(item.amount)} ₫)`);
   markDeletedId(id);
+  purgePaymentsForDeletedRecord('extraship', id);
   db.extraShipments = (db.extraShipments || []).filter(x => x.id !== id);
   addAuditLog('Xóa cước ship phát sinh', item.customer || item.orderCode || 'Cước ship', `Đã xóa ${item.content || ''} (${money(item.amount)} ₫)`);
   persist();
@@ -3294,7 +3375,7 @@ function getDailyBreakdown(filterSpec) {
     if (lp > 0) ensure(normalizeDateStr(x.date) || dateKey()).collected += lp;
   });
 
-  (db.paymentRecords || []).filter(p => matchDate(p.date)).forEach(p => {
+  getValidPaymentRecords().filter(p => matchDate(p.date)).forEach(p => {
     const d = normalizeDateStr(p.date) || dateKey();
     const amt = Math.max(0, Math.round(parseNum(p.amount)));
     if (amt > 0) ensure(d).collected += amt;
@@ -4138,7 +4219,9 @@ function getCustomersViewData() {
     const sc = (db.shipments || []).filter(x => sameCustomer(x, o)).length;
     const pc = (db.purchases || []).filter(x => sameCustomer(x, o)).length;
     const activeCustOrders = custOrders.filter(x => x.status !== 'Đã hủy');
-    const debt = activeCustOrders.reduce((sum, x) => sum + calcOrderMetrics(x).customerDebt, 0);
+    const unlinkedCustExtras = (db.extraShipments || []).filter(x => !isExtraShipLinkedToOrder(x) && sameCustomer(x, o));
+    const unlinkedExtraDebt = unlinkedCustExtras.reduce((sum, x) => sum + Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x)), 0);
+    const debt = activeCustOrders.reduce((sum, x) => sum + calcOrderMetrics(x).customerDebt, 0) + unlinkedExtraDebt;
     const totalProfit = activeCustOrders.reduce((sum, x) => sum + calcOrderMetrics(x).netProfit, 0);
     const custKey = jsArg(o.code || o.phone || o.customer);
 
@@ -4258,6 +4341,8 @@ function closeModal() {
   hideFormError();
   document.getElementById('modal').classList.remove('open');
   document.getElementById('modalBox')?.classList.remove('wide');
+  const saveBtnEl = document.getElementById('saveBtn');
+  if (saveBtnEl) saveBtnEl.textContent = '✓ Lưu thông tin';
   cancelDeleteModal();
 }
 
@@ -4299,6 +4384,8 @@ function openNew(kind = view === 'purchases' ? 'purchase' : view === 'finance' ?
   document.getElementById('modalSub').textContent = 'Gõ số bình thường (500000 hoặc 500.000 đều được); tự động lưu thời gian cập nhật.';
   document.getElementById('deleteZone').classList.add('hidden');
   document.getElementById('recordHistoryZone').classList.add('hidden');
+  const saveBtnEl = document.getElementById('saveBtn');
+  if (saveBtnEl) saveBtnEl.textContent = '✓ Lưu thông tin';
   cancelDeleteModal();
 
   renderFields(kind, preset);
@@ -4415,6 +4502,8 @@ function editRecord(kind, id) {
     'Cập nhật đơn ký gửi kho';
   document.getElementById('modalSub').textContent = o.updatedAt ? `Lần sửa gần nhất: ${o.updatedAt}` : 'Chỉnh sửa thông tin rồi bấm Lưu.';
   document.getElementById('deleteZone').classList.remove('hidden');
+  const saveBtnEl = document.getElementById('saveBtn');
+  if (saveBtnEl) saveBtnEl.textContent = '✓ Lưu thông tin';
   cancelDeleteModal();
 
   renderFields(kind, o);
@@ -4555,7 +4644,10 @@ function addDraftOrderPackItem() {
   const catId = document.getElementById('f_pickPackCatalogId')?.value;
   const qty = Math.max(0.5, parseNum(document.getElementById('f_pickPackQty')?.value || 1));
   const found = (db.packagingCatalog || []).find(x => x.id === catId);
-  if (!found) return;
+  if (!found) {
+    toast('Chưa có vật tư đóng gói trong danh mục — hãy thêm ở mục Chi phí phát sinh hoặc nhập trực tiếp giá vốn/bán bên dưới.');
+    return;
+  }
 
   // Chụp (snapshot) giá nhập và giá bán tại thời điểm gắn vào đơn
   draftOrderPackItems.push({
@@ -4608,8 +4700,8 @@ function readDraftOrderFromForm() {
   const id = document.getElementById('recordForm')?.dataset.id || '';
   const prev = (db.orderNotes || []).find(x => x.id === id);
   const lineType = val('lineType') || 'Xách tay';
-  // Bảo toàn dữ liệu lịch sử nếu đơn cũ đã có includeGoodsInFlow / partnerPaid
-  const includeGoods = prev && prev.includeGoodsInFlow !== undefined
+  // Bảo toàn dữ liệu lịch sử nếu không đổi Line; nếu người dùng đổi Line thì tính lại theo Line mới
+  const includeGoods = (prev && prev.lineType === lineType && prev.includeGoodsInFlow !== undefined)
     ? Boolean(prev.includeGoodsInFlow)
     : ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(lineType);
 
@@ -4776,10 +4868,12 @@ function renderFields(kind, o) {
       { val: 'Mua hộ trọn gói', label: '🛍 Mua hộ trọn gói' }
     ];
 
-    const catalogOpts = (db.packagingCatalog || []).map(item => {
-      const catLabel = item.category === 'wood' ? '🪵 Hộp gỗ' : item.category === 'carton' ? '📦 Carton' : '🫧 Chống sốc';
-      return `<option value="${esc(item.id)}">${catLabel}: ${esc(item.name)} (Vốn ${money(item.costPrice)}đ → Bán ${money(item.sellPrice)}đ / ${esc(item.unit || 'Cái')})</option>`;
-    }).join('');
+    const catalogOpts = (db.packagingCatalog || []).length
+      ? (db.packagingCatalog || []).map(item => {
+          const catLabel = item.category === 'wood' ? '🪵 Hộp gỗ' : item.category === 'carton' ? '📦 Carton' : '🫧 Chống sốc';
+          return `<option value="${esc(item.id)}">${catLabel}: ${esc(item.name)} (Vốn ${money(item.costPrice)}đ → Bán ${money(item.sellPrice)}đ / ${esc(item.unit || 'Cái')})</option>`;
+        }).join('')
+      : `<option value="">-- Chưa có vật tư trong danh mục (Thêm ở Chi phí phát sinh hoặc nhập tay bên dưới) --</option>`;
 
     document.getElementById('formFields').innerHTML = `
       <input type="hidden" id="f_lineType" value="${esc(line)}">
@@ -5367,6 +5461,8 @@ function deleteRecord(confirmedInline = false) {
   saveAutoSnapshot(`Trước khi xóa ${target?.customer || target?.name || id}`, true);
   if (target?.date) recordClosedPeriodAdjustment(target.date, 'Xóa bản ghi kỳ đã chốt', target?.customer || target?.name || target?.category || id, `Đã xóa ${target?.product || target?.name || target?.content || target?.category || id}`);
   markDeletedId(id);
+  if (kind === 'order') purgePaymentsForDeletedRecord('order', id);
+  if (kind === 'extraship') purgePaymentsForDeletedRecord('extraship', id);
   db[key] = (db[key] || []).filter(x => x.id !== id);
   addAuditLog('Xóa bản ghi', target?.customer || target?.name || target?.category || 'Bản ghi', `Đã xóa ${target?.product || target?.name || target?.content || target?.category || id}`);
   persist();
@@ -5387,6 +5483,7 @@ function deleteItemDirect(kind, id) {
   saveAutoSnapshot(`Trước khi xóa ${item.customer}`, true);
   if (item?.date) recordClosedPeriodAdjustment(item.date, 'Xóa bản ghi kỳ đã chốt', item.customer, `Đã xóa ${label}`);
   markDeletedId(id);
+  if (kind === 'order') purgePaymentsForDeletedRecord('order', id);
   db[key] = db[key].filter(x => x.id !== id);
   addAuditLog('Xóa bản ghi', `${item.customer}`, `Đã xóa ${label}`);
   persist();
@@ -5435,17 +5532,20 @@ function importData(e, mergeMode = false) {
       let d = JSON.parse(r.result);
       if (Array.isArray(d)) d = { orderNotes: [], shipments: d, purchases: [], transactions: [], logs: [] };
       if (!Array.isArray(d.shipments) && !Array.isArray(d.orderNotes)) throw Error();
+      const inDel = (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {};
       const nextDb = {
-        orderNotes: Array.isArray(d.orderNotes) ? d.orderNotes : [],
-        shipments: Array.isArray(d.shipments) ? d.shipments : [],
-        purchases: Array.isArray(d.purchases) ? d.purchases : [],
-        transactions: Array.isArray(d.transactions) ? d.transactions : [],
-        extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
-        packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
+        orderNotes: filterOutDeleted(d.orderNotes, inDel),
+        shipments: filterOutDeleted(d.shipments, inDel),
+        purchases: filterOutDeleted(d.purchases, inDel),
+        transactions: filterOutDeleted(d.transactions, inDel),
+        extraShipments: filterOutDeleted(d.extraShipments, inDel),
+        packagingCatalog: resolvePackagingCatalog(d.packagingCatalog, inDel, Boolean(d._catalogInitialized || Array.isArray(d.packagingCatalog))),
         logs: Array.isArray(d.logs) ? d.logs : [],
-        paymentRecords: Array.isArray(d.paymentRecords) ? d.paymentRecords : [],
+        paymentRecords: filterOutDeleted(d.paymentRecords, inDel),
         businessPeriods: Array.isArray(d.businessPeriods) ? d.businessPeriods : [],
-        deletedIds: (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {}
+        deletedIds: inDel,
+        _catalogInitialized: true,
+        _userModified: true
       };
       if (mergeMode) {
         if (confirm(`Gộp thêm an toàn ${nextDb.orderNotes.length} Note đơn, ${nextDb.shipments.length} vận đơn, ${nextDb.purchases.length} đơn mua hộ từ tệp JSON? Dữ liệu hiện tại KHÔNG bị xóa.`)) {
@@ -5592,17 +5692,20 @@ function restoreAutoSnapshot(snapId) {
   }
   saveAutoSnapshot('Trước khi khôi phục mốc cũ', true);
   const d = target.data;
+  const snapDel = (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {};
   db = {
-    orderNotes: Array.isArray(d.orderNotes) ? d.orderNotes : [],
-    shipments: Array.isArray(d.shipments) ? d.shipments : [],
-    purchases: Array.isArray(d.purchases) ? d.purchases : [],
-    transactions: Array.isArray(d.transactions) ? d.transactions : [],
-    extraShipments: Array.isArray(d.extraShipments) ? d.extraShipments : [],
-    packagingCatalog: Array.isArray(d.packagingCatalog) && d.packagingCatalog.length ? d.packagingCatalog : samplePackagingCatalog(),
+    orderNotes: filterOutDeleted(d.orderNotes, snapDel),
+    shipments: filterOutDeleted(d.shipments, snapDel),
+    purchases: filterOutDeleted(d.purchases, snapDel),
+    transactions: filterOutDeleted(d.transactions, snapDel),
+    extraShipments: filterOutDeleted(d.extraShipments, snapDel),
+    packagingCatalog: resolvePackagingCatalog(d.packagingCatalog, snapDel, Boolean(d._catalogInitialized || Array.isArray(d.packagingCatalog))),
     logs: Array.isArray(d.logs) ? d.logs : [],
-    paymentRecords: Array.isArray(d.paymentRecords) ? d.paymentRecords : [],
+    paymentRecords: filterOutDeleted(d.paymentRecords, snapDel),
     businessPeriods: Array.isArray(d.businessPeriods) ? d.businessPeriods : [],
-    deletedIds: (d.deletedIds && typeof d.deletedIds === 'object') ? d.deletedIds : {}
+    deletedIds: snapDel,
+    _catalogInitialized: true,
+    _userModified: true
   };
   reconcileBusinessPeriods(undefined, { skipPersist: true, silent: true });
   addAuditLog('Khôi phục mốc dự phòng', 'Hệ thống', `Khôi phục về mốc ${target.time} (${target.reason})`);
@@ -5614,6 +5717,9 @@ function restoreAutoSnapshot(snapId) {
 
 function isUntouchedSeedDB(candidate) {
   if (!candidate || typeof candidate !== 'object') return false;
+  if (candidate._userModified) return false;
+  if (candidate.deletedIds && Object.keys(candidate.deletedIds).length > 0) return false;
+  if (Array.isArray(candidate.paymentRecords) && candidate.paymentRecords.length > 0) return false;
   const seedOrderIds = new Set(['on1', 'on2']);
   const seedShipIds = new Set(['s1', 's2', 's3']);
   const seedBuyIds = new Set(['p1', 'p2']);
@@ -5627,6 +5733,7 @@ function isUntouchedSeedDB(candidate) {
   const extras = candidate.extraShipments || [];
   const packs = candidate.packagingCatalog || [];
 
+  if (orders.length !== 2 || ships.length !== 3 || buys.length !== 2 || txs.length !== 2) return false;
   if (extras.length > 0) return false;
   if (orders.some(x => !seedOrderIds.has(x.id) || (x.history && x.history.length > 1) || x.updatedAtMs)) return false;
   if (ships.some(x => !seedShipIds.has(x.id) || (x.history && x.history.length > 0) || x.updatedAtMs)) return false;
@@ -5669,11 +5776,13 @@ function smartMergeDB(localDb, remoteRaw, opts = {}) {
       purchases: remoteDb.purchases,
       transactions: remoteDb.transactions,
       extraShipments: remoteDb.extraShipments,
-      packagingCatalog: remoteDb.packagingCatalog.length ? remoteDb.packagingCatalog : samplePackagingCatalog(),
+      packagingCatalog: Array.isArray(remoteDb.packagingCatalog) ? remoteDb.packagingCatalog : [],
       logs: remoteDb.logs.slice(0, 300),
       paymentRecords: remoteDb.paymentRecords,
       businessPeriods: remoteDb.businessPeriods,
-      deletedIds: remoteDb.deletedIds || {}
+      deletedIds: remoteDb.deletedIds || {},
+      _catalogInitialized: true,
+      _userModified: true
     };
   }
 
@@ -5741,11 +5850,13 @@ function smartMergeDB(localDb, remoteRaw, opts = {}) {
     purchases: mergeList(localDb.purchases, remoteDb.purchases),
     transactions: mergeList(localDb.transactions, remoteDb.transactions),
     extraShipments: mergeList(localDb.extraShipments, remoteDb.extraShipments),
-    packagingCatalog: mergedPack.length ? mergedPack : samplePackagingCatalog(),
+    packagingCatalog: mergedPack,
     logs: mergedLogs,
     paymentRecords: mergeList(localDb.paymentRecords, remoteDb.paymentRecords),
     businessPeriods: mergePeriods(localDb.businessPeriods, remoteDb.businessPeriods),
-    deletedIds: mergedDeleted
+    deletedIds: mergedDeleted,
+    _catalogInitialized: true,
+    _userModified: true
   };
 }
 
@@ -5980,6 +6091,37 @@ function saveSyncSettingsFromModal() {
   }
 }
 
+async function testFirebaseConnection() {
+  const urlInput = document.getElementById('f_syncUrl');
+  const roomInput = document.getElementById('f_syncRoom');
+  const baseUrl = cleanFirebaseUrl(urlInput ? urlInput.value : loadSyncConfig().url);
+  const room = cleanRoomId(roomInput ? roomInput.value : loadSyncConfig().room);
+  if (!baseUrl) {
+    alert('Vui lòng dán Link Firebase Realtime Database vào ô số 1 trước khi kiểm tra kết nối!');
+    return;
+  }
+  try {
+    toast('🔌 Đang kiểm tra kết nối tới kho đám mây...');
+    const res = await fetch(`${baseUrl}/rooms/${encodeURIComponent(room)}/_meta.json`, { method: 'GET', cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const meta = await res.json();
+    alert(`✅ KẾT NỐI THÀNH CÔNG!\n\nKho dùng chung: ${room}\n${meta?.syncedAt ? `Lần đồng bộ gần nhất trên mây: ${meta.syncedAt}` : 'Kho sẵn sàng — hãy bấm "✓ Lưu & Đồng bộ ngay" để đẩy dữ liệu lên!'}`);
+  } catch (err) {
+    alert(`❌ Chưa kết nối được (${err.message || 'Lỗi mạng'}).\n\nHãy kiểm tra:\n1. Link có đúng dạng https://...firebasedatabase.app hoặc .firebaseio.com chưa?\n2. Trong Firebase → Realtime Database → tab Rules đã để ".read": true, ".write": true và bấm Publish chưa?`);
+  }
+}
+
+function flushPendingStateOnExit() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(db));
+    if (syncDebounceTimer) {
+      clearTimeout(syncDebounceTimer);
+      syncDebounceTimer = null;
+      syncNow(true);
+    }
+  } catch {}
+}
+
 function openSyncModal() {
   const form = document.getElementById('recordForm');
   form.reset();
@@ -5988,8 +6130,8 @@ function openSyncModal() {
   formDirty = false;
   hideFormError();
   document.getElementById('modalBox')?.classList.add('wide');
-  document.getElementById('modalTitle').textContent = '☁ Đồng bộ 2 chiều & Sao lưu chống mất dữ liệu';
-  document.getElementById('modalSub').textContent = 'Dữ liệu luôn được lưu trên máy trước, tự động chụp 10 mốc dự phòng và gộp an toàn — tuyệt đối không tự xóa dữ liệu.';
+  document.getElementById('modalTitle').textContent = '☁ Đồng bộ 2 chiều (Bạn & Minh) & Sao lưu chống mất dữ liệu';
+  document.getElementById('modalSub').textContent = 'GitHub Pages chỉ lưu giao diện web. Dữ liệu luôn tự lưu trên máy + kết nối Firebase để 2 máy Bạn & Minh tự đồng bộ sang nhau.';
   document.getElementById('deleteZone').classList.add('hidden');
   document.getElementById('calcPreviewZone').innerHTML = '';
   document.getElementById('recordHistoryZone').classList.add('hidden');
@@ -6016,8 +6158,9 @@ function openSyncModal() {
   document.getElementById('formFields').innerHTML = `
     <div class="full sync-status-banner ${connected ? 'connected' : ''}">
       <div>
-        <div class="sync-banner-title">${connected ? '☁ Đang bật Đồng bộ Đám mây 2 chiều' : '💾 Đang lưu an toàn trên trình duyệt máy này'}</div>
-        <div class="sync-banner-sub">Hiện có: <b>${counts.orderNotes}</b> Note đơn · <b>${counts.shipments}</b> Vận đơn · <b>${counts.purchases}</b> Mua hộ · <b>${counts.transactions}</b> Thu chi · <b>${counts.extraShipments}</b> Cước ship PS${cfg.lastSyncAt ? ` · Đồng bộ gần nhất: <b>${esc(cfg.lastSyncAt)}</b>` : ''}</div>
+        <div class="sync-banner-title">${connected ? `☁ ĐÃ BẬT ĐỒNG BỘ 2 MÁY · Kho "${esc(cleanRoomId(cfg.room))}"` : '⚠ CHƯA NỐI MÂY GIỮA 2 MÁY · Đang lưu an toàn trên riêng máy này'}</div>
+        <div class="sync-banner-sub">${connected ? 'Mọi đơn bạn hoặc Minh nhập đều tự gộp 2 chiều, không bao giờ tự xóa dữ liệu của nhau.' : 'Lưu ý quan trọng: GitHub chỉ chứa code giao diện, không tự truyền đơn hàng giữa 2 máy. Hãy dán Link Firebase bên dưới 1 lần để máy bạn và máy Minh thông nhau!'}</div>
+        <div class="sync-banner-sub" style="margin-top:4px">Đang lưu: <b>${counts.orderNotes}</b> Note đơn · <b>${counts.shipments}</b> Vận đơn · <b>${counts.purchases}</b> Mua hộ · <b>${counts.transactions}</b> Thu chi · <b>${counts.extraShipments}</b> Cước ship PS${cfg.lastSyncAt ? ` · Đồng bộ lúc: <b>${esc(cfg.lastSyncAt)}</b>` : ''}</div>
       </div>
       <div class="sync-banner-actions">
         ${connected ? `<button type="button" class="btn small primary" onclick="syncNow(false)">↻ Đồng bộ ngay</button>` : ''}
@@ -6027,8 +6170,8 @@ function openSyncModal() {
 
     <div class="full sync-card">
       <div class="sync-card-head">
-        <strong>1. Đồng bộ chung cho bạn và cộng sự (Miễn phí qua Firebase)</strong>
-        <span class="sync-pill">Gộp thông minh · Không tự xóa</span>
+        <strong>1. Đồng bộ tự động giữa máy Bạn &amp; máy Minh (Miễn phí qua Firebase)</strong>
+        <span class="sync-pill">Gộp thông minh · Không mất dữ liệu</span>
       </div>
       <div class="sync-grid-2">
         <div class="field-group">
@@ -6046,16 +6189,17 @@ function openSyncModal() {
       </label>
       <div class="sync-btn-row">
         <button type="button" class="btn primary small" onclick="saveSyncSettingsFromModal()">✓ Lưu &amp; Đồng bộ ngay</button>
-        <button type="button" class="btn small" onclick="copySyncShareLink()">📋 Chép link cài sẵn gửi bạn</button>
+        <button type="button" class="btn small" onclick="testFirebaseConnection()">🔌 Kiểm tra kết nối</button>
+        <button type="button" class="btn small" onclick="copySyncShareLink()">📋 Chép link cài sẵn gửi Minh</button>
         ${connected ? `<button type="button" class="btn small" onclick="disableCloudSync()">Tắt đồng bộ</button>` : ''}
       </div>
-      <details class="sync-guide">
-        <summary>📖 Cách lấy Link Firebase miễn phí trong 2 phút (chỉ cần làm 1 lần duy nhất)</summary>
+      <details class="sync-guide" ${connected ? '' : 'open'}>
+        <summary>📖 Cách lấy Link Firebase miễn phí trong 2 phút để Bạn &amp; Minh dùng chung vĩnh viễn</summary>
         <ol>
-          <li>Vào <a href="https://console.firebase.google.com" target="_blank" rel="noopener">console.firebase.google.com</a> → đăng nhập Google → bấm <b>Add project</b> (đặt tên bất kỳ, ví dụ <code>dairycow-logistics</code>).</li>
-          <li>Menu trái chọn <b>Build → Realtime Database → Create Database</b> → chọn khu vực <b>Singapore (asia-southeast1)</b> → chọn <b>Start in test mode</b> → bấm <b>Enable</b>.</li>
-          <li>Copy đường dẫn dạng <code>https://...firebasedatabase.app</code> dán vào ô phía trên rồi bấm <b>Lưu &amp; Đồng bộ ngay</b>.</li>
-          <li>Bấm <b>📋 Chép link cài sẵn gửi bạn</b> rồi gửi qua Zalo — bạn của bạn chỉ cần mở link đó là tự kết nối chung kho, không phải cài gì thêm!</li>
+          <li>Vào <a href="https://console.firebase.google.com" target="_blank" rel="noopener">console.firebase.google.com</a> bằng Gmail → bấm <b>Add project</b> / <b>Create a project</b> (đặt tên <code>dairycow-minh</code>, tắt Google Analytics cho nhanh → <b>Create</b>).</li>
+          <li>Menu trái chọn <b>Build → Realtime Database → Create Database</b> → chọn <b>Singapore (asia-southeast1)</b> → chọn <b>Start in test mode</b> → bấm <b>Enable</b>. (Để dùng lâu dài không hết hạn 30 ngày: sang tab <b>Rules</b> sửa thành <code>{ "rules": { ".read": true, ".write": true } }</code> rồi bấm <b>Publish</b>).</li>
+          <li>Copy đường link <code>https://...firebasedatabase.app</code> dán vào ô trên → bấm <b>✓ Lưu &amp; Đồng bộ ngay</b>.</li>
+          <li>Bấm <b>📋 Chép link cài sẵn gửi Minh</b> gửi qua Zalo cho Minh — Minh bấm mở link đó là tự kết nối chung kho ngay lập tức!</li>
         </ol>
       </details>
     </div>
@@ -6090,8 +6234,12 @@ window.addEventListener('online', () => {
   if (cleanFirebaseUrl(cfg.url)) syncNow(true);
 });
 
+window.addEventListener('pagehide', flushPendingStateOnExit);
+
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
+  if (document.hidden) {
+    flushPendingStateOnExit();
+  } else {
     const res = reconcileBusinessPeriods();
     if (res.newlyClosed.length > 0 || res.periodRolledOver) {
       render();
