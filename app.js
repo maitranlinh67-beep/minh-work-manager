@@ -5886,14 +5886,19 @@ function updateSyncBadge(state = '') {
 
   if (enabled) {
     const t = cfg.lastSyncAt || nowStamp();
+    const shortT = String(t).split(' - ')[0] || t;
     if (statusEl) {
-      statusEl.textContent = `☁ Đã đồng bộ ${t}`;
+      statusEl.textContent = `☁ Đồng bộ ${shortT}`;
+      statusEl.title = `Đã đồng bộ đám mây (${cleanRoomId(cfg.room)}) lúc ${t} · Bấm để xem chi tiết`;
       statusEl.classList.remove('warn');
     }
     if (topBtn) topBtn.textContent = `☁ Đã đồng bộ · ${cleanRoomId(cfg.room)}`;
   } else {
+    const t = nowStamp();
+    const shortT = String(t).split(' - ')[0] || t;
     if (statusEl && !statusEl.textContent.includes('Lỗi bộ nhớ')) {
-      statusEl.textContent = `✓ Lưu trên máy · ${nowStamp()}`;
+      statusEl.textContent = `✓ Đã lưu ${shortT}`;
+      statusEl.title = `Đã lưu an toàn trên máy lúc ${t} · Bấm để bật đồng bộ 2 máy (Bạn & Minh)`;
       statusEl.classList.remove('warn');
     }
     if (topBtn) topBtn.textContent = '☁ Đồng bộ & Sao lưu';
@@ -6269,7 +6274,7 @@ if (localStorage.getItem(THEME_KEY) === 'purple') {
 
 const todayBrandEl = document.getElementById('today');
 if (todayBrandEl) {
-  todayBrandEl.innerHTML = '<em class="dc-since-blue">Since</em> 2021 · WMS &amp; OMS';
+  todayBrandEl.textContent = 'WMS & OMS';
 }
 
 // Sao lưu an toàn 1 lần trước khi kích hoạt cơ chế Chốt kỳ ngày 26 (phương án khôi phục)
