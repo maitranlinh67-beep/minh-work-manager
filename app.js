@@ -7,6 +7,18 @@ const APP_TIMEZONE = 'Asia/Ho_Chi_Minh';
 const BIZ_CLOSE_DAY = 26;
 
 const lineTypes = ['Xách tay', 'Thanh toán hộ', 'Ký gửi kho', 'Mua hộ trọn gói', 'Khác'];
+const shopPlatforms = [
+  'POIZON',
+  'TMALL',
+  '1688',
+  '95分',
+  'TAOBAO',
+  'JINGDONG',
+  'PIN DUO DUO',
+  'XIAN YU',
+  'VIP SHOP',
+  'Khác'
+];
 const goodsTypes = ['Thức ăn khô', 'Gia dụng', 'Mỹ phẩm', 'Quần áo', 'Giày dép', 'Đồ cơ khí', 'Điện tử / Phụ kiện', 'Khác'];
 const packagingTypes = [
   'Tiêu chuẩn (Miễn phí)',
@@ -77,6 +89,7 @@ let lastAutoSnapTs = 0;
 let lastActiveBizPeriodId = '';
 let periodWatcherTimer = null;
 window.statusFilter = '';
+window.platformFilter = '';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -535,6 +548,52 @@ function linePill(lineType) {
   if (l === 'Xách tay') return `<span class="line-pill line-xt">✈️ Xách tay</span>`;
   if (l === 'Thanh toán hộ') return `<span class="line-pill line-tth">💴 Thanh toán hộ</span>`;
   return `<span class="line-pill line-other">📦 ${esc(l)}</span>`;
+}
+
+function normalizePlatformName(raw = '') {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const up = s.toUpperCase();
+  if (up === 'POIZON' || up === 'DEWU') return 'POIZON';
+  if (up === 'TMALL') return 'TMALL';
+  if (up === '1688') return '1688';
+  if (s === '95分' || up === '95' || up === '95FEN') return '95分';
+  if (up === 'TAOBAO') return 'TAOBAO';
+  if (up === 'JINGDONG' || up === 'JD') return 'JINGDONG';
+  if (up === 'PIN DUO DUO' || up === 'PINDUODUO' || up === 'PDD') return 'PIN DUO DUO';
+  if (up === 'XIAN YU' || up === 'XIANYU') return 'XIAN YU';
+  if (up === 'VIP SHOP' || up === 'VIPSHOP') return 'VIP SHOP';
+  if (up === 'KHÁC') return 'Khác';
+  return s;
+}
+
+function platformPill(platform) {
+  const p = normalizePlatformName(platform);
+  if (!p) return '';
+  const clsMap = {
+    'POIZON': 'shop-poizon',
+    'TMALL': 'shop-tmall',
+    '1688': 'shop-1688',
+    '95分': 'shop-95',
+    'TAOBAO': 'shop-taobao',
+    'JINGDONG': 'shop-jd',
+    'PIN DUO DUO': 'shop-pdd',
+    'XIAN YU': 'shop-xianyu',
+    'VIP SHOP': 'shop-vip'
+  };
+  const cls = clsMap[p] || 'shop-other';
+  return `<span class="shop-pill ${cls}" title="Mua từ app ${esc(p)}">${esc(p)}</span>`;
+}
+
+function selectOrderPlatform(appVal) {
+  const inp = document.getElementById('f_platform');
+  if (!inp) return;
+  const nextVal = inp.value === appVal ? '' : appVal;
+  inp.value = nextVal;
+  document.querySelectorAll('.shop-opt').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.shop === nextVal);
+  });
+  formDirty = true;
 }
 
 function statusClass(s) {
@@ -2096,6 +2155,7 @@ function setView(v, el) {
   view = v;
   query = '';
   window.statusFilter = '';
+  window.platformFilter = '';
   document.querySelectorAll('.nav').forEach(n => {
     n.classList.toggle('active', n.dataset.view === v);
   });
@@ -2111,16 +2171,22 @@ function setFilter(val) {
   render();
 }
 
+function setPlatformFilter(val) {
+  window.platformFilter = val;
+  render();
+}
+
 function clearFilters() {
   query = '';
   window.statusFilter = '';
+  window.platformFilter = '';
   render();
 }
 
 function handleSearch(inputEl) {
   query = inputEl.value;
   document.getElementById('searchClearBtn')?.classList.toggle('hidden', !query);
-  document.getElementById('resetFilterBtn')?.classList.toggle('hidden', !(query || window.statusFilter));
+  document.getElementById('resetFilterBtn')?.classList.toggle('hidden', !(query || window.statusFilter || window.platformFilter));
   updateTableResults();
 }
 
@@ -2132,7 +2198,7 @@ function clearSearchInput() {
     input.focus();
   }
   document.getElementById('searchClearBtn')?.classList.add('hidden');
-  document.getElementById('resetFilterBtn')?.classList.toggle('hidden', !window.statusFilter);
+  document.getElementById('resetFilterBtn')?.classList.toggle('hidden', !(window.statusFilter || window.platformFilter));
   updateTableResults();
 }
 
@@ -2536,6 +2602,7 @@ function overviewPage() {
                   <div class="todo-title">
                     <span>${esc(item.customer)}</span>
                     ${linePill(item.lineType)}
+                    ${platformPill(item.platform)}
                     <span class="code">${esc(item.packages || 1)} kiện · ${esc(item.goodsType)}</span>
                     ${item.packagingType && item.packagingType !== 'Tiêu chuẩn (Miễn phí)' ? `<span class="pack-pill">🪵 ${esc(item.packagingType)}</span>` : ''}
                   </div>
@@ -2620,8 +2687,10 @@ function getOrdersViewData() {
   const all = db.orderNotes || [];
   const filtered = all.filter(o => {
     const packNames = Array.isArray(o.packagingItems) ? o.packagingItems.map(x => x.name).join(' ') : '';
-    const text = `${o.lineType} ${o.customer} ${o.phone || ''} ${o.code || ''} ${o.waybill || ''} ${o.goodsType} ${o.packagingType || ''} ${packNames} ${o.product || ''} ${o.note || ''} ${o.status}`.toLowerCase();
+    const normPlat = normalizePlatformName(o.platform);
+    const text = `${o.lineType} ${normPlat} ${o.platform || ''} ${o.customer} ${o.phone || ''} ${o.code || ''} ${o.waybill || ''} ${o.goodsType} ${o.packagingType || ''} ${packNames} ${o.product || ''} ${o.note || ''} ${o.status}`.toLowerCase();
     if (q && !text.includes(q)) return false;
+    if (window.platformFilter && normPlat !== window.platformFilter) return false;
     if (!window.statusFilter) return true;
     if (window.statusFilter.startsWith('__line_')) return o.lineType === window.statusFilter.replace('__line_', '');
     if (window.statusFilter === '__pack') return (Array.isArray(o.packagingItems) && o.packagingItems.length > 0) || parseNum(o.packCharge) > 0 || (o.packagingType && o.packagingType !== 'Tiêu chuẩn (Miễn phí)');
@@ -2655,7 +2724,7 @@ function getOrdersViewData() {
         <div class="customer">
           <div class="mini-avatar">${avatar(o.customer)}</div>
           <div>
-            <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || '—')}</span> ${linePill(o.lineType)}</div>
+            <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || '—')}</span> ${linePill(o.lineType)} ${platformPill(o.platform)}</div>
             <div class="subline"><b>${esc(o.packages || 1)} kiện</b> · ${esc(o.goodsType)}${o.product ? ' · ' + esc(o.product) : ''}</div>
             ${hasPack ? `<div style="margin-top:3px"><span class="pack-pill">🪵 ${esc(packSummaryText)}${m.packCharge > 0 ? ` (+${money(m.packCharge)} ₫)` : ''}</span></div>` : ''}
             <div class="subline">Ngày: ${dateText(o.date)}${o.waybill ? ` · VĐ: <a class="link" target="_blank" rel="noopener" href="https://www.17track.net/en#nums=${encodeURIComponent(o.waybill)}">${esc(o.waybill)} ↗</a>` : ''}</div>
@@ -2741,7 +2810,7 @@ function ordersPage() {
     return m.customerDebt > 0 || m.warehouseDebt > 0;
   }).length;
   const data = getOrdersViewData();
-  const hasFilter = Boolean(query || window.statusFilter);
+  const hasFilter = Boolean(query || window.statusFilter || window.platformFilter);
 
   return `<div class="section-stack">
     <div class="stage-strip" aria-label="Lọc nhanh theo Line, Đóng gói và Công nợ">
@@ -2767,6 +2836,10 @@ function ordersPage() {
           <input id="searchInput" class="field" placeholder="Tìm khách hàng, loại hàng, quy cách đóng gói, mã vận đơn…" value="${esc(query)}" oninput="handleSearch(this)">
           <button type="button" id="searchClearBtn" class="search-clear ${query ? '' : 'hidden'}" onclick="clearSearchInput()" title="Xóa từ khóa">×</button>
         </div>
+        <select class="select" aria-label="Lọc theo App / Sàn mua hàng" onchange="setPlatformFilter(this.value)">
+          <option value="">Mọi App / Sàn</option>
+          ${shopPlatforms.map(p => `<option value="${esc(p)}" ${window.platformFilter === p ? 'selected' : ''}>🛍 ${esc(p)}</option>`).join('')}
+        </select>
         <select class="select" aria-label="Lọc trạng thái đơn" onchange="setFilter(this.value)">
           <option value="">Mọi trạng thái</option>
           <option value="__debt" ${window.statusFilter === '__debt' ? 'selected' : ''}>Đơn còn công nợ</option>
@@ -4079,7 +4152,7 @@ function getShipmentsViewData() {
       <div class="customer">
         <div class="mini-avatar">${avatar(o.customer)}</div>
         <div>
-          <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || 'Chưa có mã')}</span></div>
+          <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || 'Chưa có mã')}</span> ${platformPill(o.platform)}</div>
           <div class="subline">${esc(o.phone || 'Chưa có SĐT')}</div>
         </div>
       </div>
@@ -4154,7 +4227,7 @@ function getPurchasesViewData() {
       <div class="customer">
         <div class="mini-avatar">${avatar(o.customer)}</div>
         <div>
-          <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || 'Chưa có mã')}</span></div>
+          <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || 'Chưa có mã')}</span> ${platformPill(o.platform)}</div>
           <div class="subline">${esc(o.platform)} · ${esc(o.phone || 'Chưa có SĐT')}</div>
         </div>
       </div>
@@ -4408,6 +4481,7 @@ function makeOrderFromPurchase(id) {
   document.getElementById('modalTitle').textContent = 'Tạo Note đơn tính lãi từ đơn Mua hộ';
   renderFields('order', {
     lineType: 'Thanh toán hộ',
+    platform: normalizePlatformName(p.platform),
     packages: Math.max(1, parseNum(p.qty) || 1),
     customer: p.customer,
     phone: p.phone,
@@ -4434,6 +4508,7 @@ function makeOrderFromShipment(id) {
   document.getElementById('modalTitle').textContent = 'Tạo Note đơn tính cước & lãi từ Đơn ký gửi';
   renderFields('order', {
     lineType: 'Ký gửi kho',
+    platform: normalizePlatformName(s.platform),
     packages: Math.max(1, parseNum(s.qty) || 1),
     customer: s.customer,
     phone: s.phone,
@@ -4708,6 +4783,7 @@ function readDraftOrderFromForm() {
   return {
     id,
     lineType,
+    platform: normalizePlatformName(val('platform')),
     packages: Math.max(1, Math.round(parseNum(val('packages')) || 1)),
     customer: val('customer'),
     phone: val('phone'),
@@ -4857,6 +4933,7 @@ function onSelectExtraShipOrder(orderId) {
 function renderFields(kind, o) {
   if (kind === 'order') {
     const line = o.lineType || 'Xách tay';
+    const currentPlat = normalizePlatformName(o.platform || '');
     const pkg = o.packages ?? 1;
     showCnyBox = Boolean(parseNum(o.goodsCny) > 0 || ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(line));
     draftOrderPackItems = Array.isArray(o.packagingItems) ? o.packagingItems.map(x => ({ ...x })) : [];
@@ -4901,6 +4978,13 @@ function renderFields(kind, o) {
         ${field('product', 'Tên mặt hàng / Mã vận đơn phụ', o.product || '', 'text', false, false, 'Ví dụ: Áo khoác, Máy mài…')}
         ${field('phone', 'Số điện thoại khách', o.phone || '', 'tel', false, false, '09xx xxx xxx')}
         ${field('date', 'Ngày đơn hàng', o.date || dateKey(), 'date', true)}
+        <div class="full">
+          <label>Mua ở App / Sàn nào (Bấm chọn nhanh để phân biệt đơn từ shop nào)</label>
+          <input type="hidden" id="f_platform" value="${esc(currentPlat)}">
+          <div class="shop-picker" role="group" aria-label="Chọn app mua hàng">
+            ${shopPlatforms.map(p => `<button type="button" class="shop-opt ${currentPlat === p ? 'active' : ''}" data-shop="${esc(p)}" onclick="selectOrderPlatform('${esc(p)}')">${esc(p)}</button>`).join('')}
+          </div>
+        </div>
       </div>
 
       <div class="form-card">
@@ -5062,7 +5146,7 @@ function renderFields(kind, o) {
     field('customer', 'Tên khách hàng', o.customer || '', 'text', true, false, 'Ví dụ: Minh Anh', 'list="customerSuggestions" onchange="autofillCustomerInfo(this.value)"') +
     field('phone', 'Số điện thoại', o.phone || '', 'tel', false, false, '09xx xxx xxx') +
     field('code', 'Mã khách hàng', o.code || '', 'text', false, false, 'Tự gắn mã khách cũ hoặc tạo DR mới') +
-    selectField('platform', 'Nền tảng mua hàng', ['Taobao', '1688', 'Pinduoduo', 'Poizon', 'Khác'], o.platform || 'Taobao') +
+    selectField('platform', 'Mua ở App / Sàn nào', shopPlatforms, normalizePlatformName(o.platform) || 'TAOBAO') +
     field('address', 'Địa chỉ nhận hàng', o.address || '', 'text', false, true, 'Địa chỉ giao hàng tại Việt Nam');
 
   if (kind === 'shipment') {
@@ -5105,6 +5189,7 @@ function describeOrderChanges(prev, next) {
   if (!prev) return `Tạo mới đơn ${next.lineType} (${next.packages} kiện) · Lãi dự kiến ${money(calcOrderMetrics(next).netProfit)} ₫`;
   const diffs = [];
   if (prev.lineType !== next.lineType) diffs.push(`Line: ${prev.lineType} → ${next.lineType}`);
+  if ((prev.platform || '') !== (next.platform || '')) diffs.push(`Sàn: ${prev.platform || '—'} → ${next.platform || '—'}`);
   if (prev.packages !== next.packages) diffs.push(`Số kiện: ${prev.packages} → ${next.packages}`);
   if (prev.status !== next.status) diffs.push(`Trạng thái: ${prev.status} → ${next.status}`);
   if (prev.shipCharge !== next.shipCharge || prev.shipCost !== next.shipCost) diffs.push(`Cước (Gốc ${money(next.shipCost)} / Thu ${money(next.shipCharge)} ₫)`);
