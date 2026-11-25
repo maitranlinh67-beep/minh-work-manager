@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#2f353a">
   <title>DAIRYCOW LOGISTICS · Hệ thống Quản lý Vận hành WMS & OMS</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&subset=vietnamese,latin&display=swap" rel="stylesheet">
@@ -16,10 +17,13 @@
     <div class="topbar-inner">
       <div class="topbar-left">
         <div class="brand" onclick="setView('overview', document.querySelector('[data-view=overview]'))" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setView('overview', document.querySelector('[data-view=overview]'));}" role="button" tabindex="0" aria-label="Về trang tổng quan DairyCow Logistics">
-          <div class="brandmark" aria-hidden="true">🐄</div>
+          <div class="brandmark brandmark-logo" aria-hidden="true">
+            <img src="dairycow-logo-badge.jpg" alt="DAIRYCOW Since 2021" class="brand-logo-img">
+            <span class="brand-sheen"></span>
+          </div>
           <div class="brandname">
-            <span>DAIRYCOW</span>
-            <small id="today">LOGISTICS · WMS & OMS</small>
+            <span class="dc-wordmark-top"><b class="dc-dairy">DAIRY</b><b class="dc-cow">COW</b></span>
+            <small id="today"><em class="dc-since-blue">Since</em> 2021 · WMS &amp; OMS</small>
           </div>
         </div>
 
@@ -113,6 +117,17 @@
         <button type="button" class="btn primary full-btn" onclick="openNew('order')">＋ Tạo Note đơn mới</button>
         <button type="button" class="btn side-secondary-btn full-btn" onclick="setView('incidentals', document.querySelector('[data-view=incidentals]'))">🪵 Chi phí phát sinh & Đóng gói</button>
         <button type="button" class="btn side-secondary-btn full-btn" id="sideFinanceBtn" onclick="openNew('finance')">＋ Ghi khoản thu / chi</button>
+
+        <div class="side-brand-showcase" onclick="setView('overview', document.querySelector('[data-view=overview]'))" title="DAIRYCOW LOGISTICS · Since 2021">
+          <div class="sbs-glow" aria-hidden="true"></div>
+          <div class="sbs-wordmark">
+            <span class="sbs-dairy">DAIRY</span><span class="sbs-cow">COW</span>
+          </div>
+          <div class="sbs-meta">
+            <span class="sbs-since"><b>Since</b> 2021</span>
+            <span class="sbs-live"><i class="sbs-dot"></i> LOGISTICS</span>
+          </div>
+        </div>
       </div>
     </aside>
 
@@ -139,6 +154,12 @@
 
       <section class="heading">
         <div class="heading-text">
+          <div class="heading-brand-kicker" aria-label="Thương hiệu DairyCow Since 2021">
+            <span class="hbk-pulse" aria-hidden="true"></span>
+            <span class="hbk-word"><b class="hbk-dairy">DAIRY</b><b class="hbk-cow">COW</b></span>
+            <span class="hbk-sep">·</span>
+            <span class="hbk-since"><b>Since</b> 2021</span>
+          </div>
           <h1 id="pageTitle">Tổng quan</h1>
           <p id="pageDesc">Theo dõi trực quan lợi nhuận, dòng tiền, dịch vụ đóng gói và việc cần xử lý.</p>
         </div>

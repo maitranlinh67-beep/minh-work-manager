@@ -6267,7 +6267,10 @@ if (localStorage.getItem(THEME_KEY) === 'purple') {
   document.body.classList.add('theme-purple');
 }
 
-document.getElementById('today').textContent = 'LOGISTICS · WMS & OMS';
+const todayBrandEl = document.getElementById('today');
+if (todayBrandEl) {
+  todayBrandEl.innerHTML = '<em class="dc-since-blue">Since</em> 2021 · WMS &amp; OMS';
+}
 
 // Sao lưu an toàn 1 lần trước khi kích hoạt cơ chế Chốt kỳ ngày 26 (phương án khôi phục)
 try {

@@ -129,14 +129,19 @@ textarea:focus-visible,
   width: 240px;
   flex: 0 0 240px;
   height: 100%;
-  padding: 0 16px;
+  padding: 0 12px;
   display: inline-flex;
   align-items: center;
-  gap: 11px;
+  gap: 10px;
   cursor: pointer;
   user-select: none;
   border-right: 1px solid var(--line);
   background: #ffffff;
+  transition: background 0.18s var(--ease);
+}
+
+.brand:hover {
+  background: #f8fafc;
 }
 
 .brandmark {
@@ -152,23 +157,83 @@ textarea:focus-visible,
   flex: 0 0 auto;
 }
 
-.brandname span {
+.brandmark.brandmark-logo {
+  width: 68px;
+  height: 38px;
+  padding: 0;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #9ca3af 0%, #e5e7eb 55%, #ffffff 100%);
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 2px 8px rgba(0, 27, 232, 0.14);
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease);
+}
+
+.brand:hover .brandmark.brandmark-logo {
+  transform: translateY(-1px) scale(1.03);
+  box-shadow: 0 4px 12px rgba(0, 27, 232, 0.24);
+}
+
+.brand-logo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
   display: block;
-  font-weight: 800;
-  font-size: 15px;
-  letter-spacing: 0.4px;
-  color: #1e293b;
-  line-height: 1.15;
+}
+
+.brand-sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 28%, rgba(255, 255, 255, 0.72) 50%, transparent 72%);
+  transform: translateX(-130%);
+  animation: dcSheenSweep 4.8s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  pointer-events: none;
+}
+
+.brandname {
+  min-width: 0;
+}
+
+.brandname span.dc-wordmark-top {
+  display: flex;
+  align-items: baseline;
+  font-weight: 900;
+  font-size: 15.5px;
+  letter-spacing: 0.3px;
+  line-height: 1.12;
   white-space: nowrap;
+}
+
+.brandname .dc-dairy {
+  font-weight: 900;
+  color: #1e293b;
+}
+
+.brandname .dc-cow {
+  font-weight: 900;
+  background: linear-gradient(90deg, #0018e8 0%, #2563eb 45%, #0018e8 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: dcTextFlow 4s linear infinite;
 }
 
 .brandname small {
   display: block;
   font-size: 10.5px;
-  color: var(--core-blue);
+  color: #64748b;
   font-weight: 700;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
   white-space: nowrap;
+}
+
+.brandname small .dc-since-blue {
+  font-style: normal;
+  font-weight: 800;
+  color: #001be8;
 }
 
 .sidebar-toggle {
@@ -3103,5 +3168,203 @@ tr.row-selected-period {
 @media (max-width: 820px) {
   .inc-stats-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ==================== HIỆU ỨNG MOTION THƯƠNG HIỆU DAIRYCOW (SINCE 2021) ==================== */
+@keyframes dcSheenSweep {
+  0%, 62% { transform: translateX(-135%); }
+  100% { transform: translateX(135%); }
+}
+
+@keyframes dcTextFlow {
+  0% { background-position: 0% center; }
+  100% { background-position: 200% center; }
+}
+
+@keyframes dcPulseDot {
+  0%, 100% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 rgba(0, 27, 232, 0.45); }
+  50% { transform: scale(1.12); opacity: 0.88; box-shadow: 0 0 0 5px rgba(0, 27, 232, 0); }
+}
+
+@keyframes dcFloatGlow {
+  0%, 100% { transform: translate3d(-8%, -10%, 0) scale(1); opacity: 0.55; }
+  50% { transform: translate3d(12%, 8%, 0) scale(1.15); opacity: 0.85; }
+}
+
+/* 1. Nhãn chuyển động DAIRYCOW · Since 2021 phía trên Tiêu đề trang */
+.heading-brand-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 11px 3px 9px;
+  margin-bottom: 5px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #e2e8f0 0%, #f8fafc 60%, #ffffff 100%);
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+  font-size: 11.5px;
+  letter-spacing: 0.35px;
+  position: relative;
+  overflow: hidden;
+}
+
+.heading-brand-kicker::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.8) 50%, transparent 70%);
+  transform: translateX(-130%);
+  animation: dcSheenSweep 5.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.hbk-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #001be8;
+  animation: dcPulseDot 2.4s ease-in-out infinite;
+  flex: 0 0 auto;
+}
+
+.hbk-word {
+  font-weight: 900;
+  letter-spacing: 0.5px;
+}
+
+.hbk-dairy {
+  font-weight: 900;
+  color: #1e293b;
+}
+
+.hbk-cow {
+  font-weight: 900;
+  background: linear-gradient(90deg, #0018e8 0%, #3b82f6 50%, #0018e8 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: dcTextFlow 3.6s linear infinite;
+}
+
+.hbk-sep {
+  color: #94a3b8;
+  font-weight: 700;
+}
+
+.hbk-since {
+  font-size: 11px;
+  font-weight: 700;
+  color: #475569;
+}
+
+.hbk-since b {
+  color: #001be8;
+  font-weight: 800;
+}
+
+/* 2. Thẻ chữ ký thương hiệu DAIRYCOW động ở chân Sidebar tối */
+.side-brand-showcase {
+  margin-top: 6px;
+  padding: 12px 13px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12) 0%, rgba(148, 163, 184, 0.08) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.22s var(--ease), border-color 0.22s var(--ease);
+}
+
+.side-brand-showcase:hover {
+  transform: translateY(-2px);
+  border-color: rgba(96, 165, 250, 0.55);
+}
+
+.sbs-glow {
+  position: absolute;
+  width: 110px;
+  height: 110px;
+  top: -36px;
+  right: -24px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(37, 99, 235, 0.48) 0%, rgba(32, 168, 216, 0) 72%);
+  animation: dcFloatGlow 5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.sbs-wordmark {
+  position: relative;
+  font-size: 19px;
+  font-weight: 900;
+  letter-spacing: 0.6px;
+  line-height: 1.1;
+  display: flex;
+  align-items: baseline;
+}
+
+.sbs-dairy {
+  color: #ffffff;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
+}
+
+.sbs-cow {
+  background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 40%, #93c5fd 55%, #2563eb 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: dcTextFlow 3.5s linear infinite;
+}
+
+.sbs-meta {
+  position: relative;
+  margin-top: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.sbs-since b {
+  color: #60a5fa;
+  font-weight: 800;
+}
+
+.sbs-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.8px;
+  letter-spacing: 0.5px;
+  color: #a7f3d0;
+}
+
+.sbs-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 6px #10b981;
+  display: inline-block;
+}
+
+.shell.sidebar-collapsed .side-brand-showcase {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .brand {
+    width: auto;
+    flex: 0 1 auto;
+    border-right: 0;
+    padding: 0 8px 0 10px;
+  }
+  .brandmark.brandmark-logo {
+    width: 56px;
+    height: 34px;
   }
 }
