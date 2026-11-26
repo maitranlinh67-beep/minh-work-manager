@@ -42,10 +42,13 @@
       <div class="topright">
         <button type="button" class="save-status" id="saveStatus" onclick="openSyncModal()" title="Bấm để mở Cài đặt Đồng bộ giữa nhiều máy & Bản sao lưu tự động">✓ Đã lưu tự động</button>
 
-        <button type="button" class="notif-btn" onclick="setView('overview', document.querySelector('[data-view=overview]'))" title="Việc cần xử lý & Công nợ mở">
-          🔔
-          <span class="notif-badge" id="topTodoBadge">0</span>
-        </button>
+        <div class="notif-wrap" id="notifWrap">
+          <button type="button" class="notif-btn" id="notifBtn" onclick="toggleNotifPopover(event)" title="Xem danh sách Việc cần xử lý & Công nợ mở" aria-haspopup="true" aria-expanded="false">
+            🔔
+            <span class="notif-badge" id="topTodoBadge">0</span>
+          </button>
+          <div class="notif-popover hidden" id="notifPopover" role="menu" aria-label="Thông báo việc cần xử lý"></div>
+        </div>
 
         <button type="button" class="top-ctrl-btn" onclick="toggleSidebarTheme()" id="themeToggleBtn" title="Đổi màu thanh Menu trái (CoreUI Dark / Creative Tim Purple)">
           🎨 Đổi tone

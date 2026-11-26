@@ -1368,15 +1368,18 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
 
   const debtMainVal = isClosedView ? periodObj.snapshot.endingCustomerDebt : allStats.allCustomerDebt;
   const debtMainLabel = isClosedView
-    ? `Công nợ chốt cuối kỳ (${dateText(periodObj.endDate)})`
-    : 'Tổng công nợ còn phải thu (Thực tế)';
+    ? `📥 Phải thu khách chốt cuối kỳ (${dateText(periodObj.endDate)})`
+    : '📥 Khách còn nợ phải thu (Thực tế)';
+  const oldDebtCarry = Math.max(0, allStats.allCustomerDebt - (chartStats.periodNewCustomerDebt || 0));
   const debtSubText = isClosedView
-    ? `Phát sinh trong kỳ: ${money(periodObj.snapshot.periodNewCustomerDebt)} ₫ · Nợ thực tế hiện tại: ${money(allStats.allCustomerDebt)} ₫`
-    : `Phát sinh mới kỳ này: ${money(chartStats.periodNewCustomerDebt)} ₫ · ${allStats.allWarehouseUnpaid > 0 ? `Nợ kho: ${money(allStats.allWarehouseUnpaid)} ₫` : '✓ Đủ cước kho'}`;
+    ? `Phát sinh trong kỳ: ${money(periodObj.snapshot.periodNewCustomerDebt)} ₫ · Nợ hiện tại: ${money(allStats.allCustomerDebt)} ₫`
+    : `Phát sinh kỳ này: ${money(chartStats.periodNewCustomerDebt)} ₫ · Kỳ trước chuyển sang: ${money(oldDebtCarry)} ₫`;
 
   const cashSubText = chartStats.debtRecoveryIn > 0
     ? `Thu nợ kỳ trước: +${shortMoney(chartStats.debtRecoveryIn)} ₫ · Chi/Chuyển ra: −${shortMoney(chartStats.totalTransferredOut)} ₫`
     : `Phát sinh phải thu: ${shortMoney(chartStats.totalBilledCustomer)} ₫ · Chi/Chuyển ra: −${shortMoney(chartStats.totalTransferredOut)} ₫`;
+
+  const scopeTag = isClosedView ? 'ĐÃ CHỐT' : 'KỲ NÀY';
 
   return `<div class="coreui-kpi-grid">
     <div class="coreui-widget w-blue" onclick="${hideProfit ? "setView('orders',document.querySelector('[data-view=orders]'))" : "openFinanceSubtab('report')"}">
@@ -1386,7 +1389,7 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
           <div class="widget-label">${hideProfit ? `Note đơn (${esc(chartPeriodLabel)})` : `Lợi nhuận thực tế (${esc(chartPeriodLabel)})`}</div>
           <div class="widget-sub">${hideProfit ? `Đóng gói kỹ trong kỳ: ${packCount} đơn` : `Cước +${shortMoney(chartStats.shipProfitTotal)} · DV +${shortMoney(chartStats.totalServiceRevenue)} · ĐG +${shortMoney(chartStats.packProfitTotal || 0)} · Tệ +${shortMoney(chartStats.fxProfitTotal)}`}</div>
         </div>
-        <span class="widget-gear" aria-hidden="true">⚙ ▾</span>
+        <span class="widget-scope-pill">${scopeTag}</span>
       </div>
       <svg class="widget-spark" viewBox="0 0 240 56" preserveAspectRatio="none" aria-hidden="true">
         <polyline fill="none" stroke="rgba(255,255,255,0.65)" stroke-width="2" points="14,42 52,22 90,34 128,14 166,24 204,12 228,36"/>
@@ -1404,10 +1407,10 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
       <div class="widget-top">
         <div>
           <div class="widget-val">${hideProfit ? `${chartStats.shipmentCount} Ký gửi` : `${money(chartStats.totalCollectedFromCustomer)} ₫`}</div>
-          <div class="widget-label">${hideProfit ? `Đơn ký gửi (${esc(chartPeriodLabel)})` : `Tổng tiền thu trong kỳ (${esc(chartPeriodLabel)})`}</div>
+          <div class="widget-label">${hideProfit ? `Đơn ký gửi (${esc(chartPeriodLabel)})` : `Tiền đã thu trong kỳ (${esc(chartPeriodLabel)})`}</div>
           <div class="widget-sub">${hideProfit ? 'Bấm để quản lý mã vận đơn' : cashSubText}</div>
         </div>
-        <span class="widget-gear" aria-hidden="true">📍</span>
+        <span class="widget-scope-pill">${scopeTag}</span>
       </div>
       <svg class="widget-spark" viewBox="0 0 240 56" preserveAspectRatio="none" aria-hidden="true">
         <polyline fill="none" stroke="rgba(255,255,255,0.7)" stroke-width="2" points="14,46 54,36 94,26 134,12 174,25 214,34 228,44"/>
@@ -1427,7 +1430,7 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
           <div class="widget-label">${esc(debtMainLabel)}</div>
           <div class="widget-sub">${esc(debtSubText)}</div>
         </div>
-        <span class="widget-gear" aria-hidden="true">⚙ ▾</span>
+        <span class="widget-scope-pill scope-carry">${isClosedView ? 'CHỐT KỲ' : 'XUYÊN KỲ'}</span>
       </div>
       <svg class="widget-spark" viewBox="0 0 240 56" preserveAspectRatio="none" aria-hidden="true">
         <path d="M0,38 Q45,10 95,22 T185,34 T240,18 L240,56 L0,56 Z" fill="rgba(255,255,255,0.25)"/>
@@ -1440,9 +1443,9 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
         <div>
           <div class="widget-val">${chartStats.totalTrafficOrders} đơn</div>
           <div class="widget-label">Lưu lượng đơn hàng (${esc(chartPeriodLabel)})</div>
-          <div class="widget-sub">${chartStats.orderCount} Note đơn · ${chartStats.shipmentCount} Ký gửi · ${chartStats.purchaseCount} Mua hộ · (${allPendingCount} việc đang mở)</div>
+          <div class="widget-sub">${chartStats.orderCount} Note đơn · ${chartStats.shipmentCount} Ký gửi · ${chartStats.purchaseCount} Mua hộ</div>
         </div>
-        <span class="widget-gear" aria-hidden="true">⚙ ▾</span>
+        <span class="widget-scope-pill">${scopeTag}</span>
       </div>
       <svg class="widget-spark" viewBox="0 0 240 56" preserveAspectRatio="none" aria-hidden="true">
         ${[28, 38, 18, 32, 42, 26, 20, 36, 24, 40, 22, 34, 18, 38, 28, 22].map((h, i) => `<rect x="${10 + i * 14}" y="${56 - h}" width="7" height="${h}" rx="1.5" fill="rgba(255,255,255,0.45)"/>`).join('')}
@@ -2566,8 +2569,23 @@ function overviewPage() {
   const debtOnlyCount = allPending.filter(x => x.kind === 'order' && hasAnyDebt(x.metrics)).length;
   const recentLogs = (db.logs || []).slice(0, 6);
 
+  const actionStrip = `<div class="dash-alert-strip">
+    <button type="button" class="dash-alert-pill ${allPending.length > 0 ? 'warn' : 'ok'}" onclick="scrollToTasksPanel()">
+      <span>${allPending.length > 0 ? '⚠' : '✓'}</span>
+      <b>${allPending.length} việc cần xử lý</b>
+      <small>${allPending.length > 0 ? '(Bấm xem danh sách Tasks ↓)' : 'Mọi việc đều gọn gàng'}</small>
+    </button>
+    <button type="button" class="dash-alert-pill ${allStats.allWarehouseUnpaid > 0 ? 'payable' : 'ok'}" onclick="openFinanceSubtab('debts')">
+      <span>📤</span>
+      <b>Mình nợ cước kho phải trả: ${money(allStats.allWarehouseUnpaid)} ₫</b>
+      <small>${allStats.allWarehouseUnpaid > 0 ? '(Tách riêng với khách nợ · Bấm để trả kho →)' : '✓ Đã thanh toán hết'}</small>
+    </button>
+  </div>`;
+
   return `<div class="section-stack">
     ${renderBusinessPeriodBanner()}
+
+    ${actionStrip}
 
     ${renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPending.length, selectedPeriodObj, filterSpec)}
 
@@ -2581,7 +2599,7 @@ function overviewPage() {
     </div>
 
     <div class="overview-split">
-      <section class="panel">
+      <section class="panel" id="tasksPanel">
         <div class="panel-head">
           <div>
             <div class="panel-title">📌 Tasks · Việc cần xử lý & Công nợ mở</div>
@@ -6342,8 +6360,95 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+/* ============================================================
+   POPOVER THÔNG BÁO (CHUÔNG 🔔) & CUỘN NHANH ĐẾN TASKS
+   ============================================================ */
+function scrollToTasksPanel() {
+  closeNotifPopover();
+  if (view !== 'overview') {
+    setView('overview', document.querySelector('[data-view=overview]'));
+  }
+  setTimeout(() => {
+    const el = document.getElementById('tasksPanel');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 50);
+}
+
+function renderNotifPopover() {
+  const pop = document.getElementById('notifPopover');
+  if (!pop) return;
+  const items = getPendingItems();
+  const rows = items.slice(0, 12).map(item => {
+    if (item.kind === 'order') {
+      const m = item.metrics;
+      const tags = [];
+      if (m.customerDebt > 0) tags.push(`<span class="notif-tag owe">Khách nợ ${money(m.customerDebt)} ₫</span>`);
+      if (m.warehouseDebt > 0) tags.push(`<span class="notif-tag ware">Nợ kho ${money(m.warehouseDebt)} ₫</span>`);
+      if (!tags.length) tags.push(`<span class="notif-tag info">${esc(item.status)}</span>`);
+      return `<div class="notif-pop-item" onclick="closeNotifPopover();editRecord('order','${item.id}')">
+        <div class="notif-pop-main">
+          <b>${esc(item.customer)} · ${esc(item.product || item.goodsType)}</b>
+          <div class="notif-pop-tags">${tags.join(' ')}</div>
+        </div>
+        <div class="notif-pop-actions" onclick="event.stopPropagation()">
+          ${m.customerDebt > 0 ? `<button type="button" class="iconbtn primary-tint" onclick="settleOrderDebt('${item.id}','customer');renderNotifPopover()">Thu đủ</button>` : ''}
+          ${m.warehouseDebt > 0 ? `<button type="button" class="iconbtn" onclick="settleOrderDebt('${item.id}','warehouse');renderNotifPopover()">Trả kho</button>` : ''}
+        </div>
+      </div>`;
+    }
+    const isShip = item.kind === 'shipment';
+    return `<div class="notif-pop-item" onclick="closeNotifPopover();editRecord('${item.kind}','${item.id}')">
+      <div class="notif-pop-main">
+        <b>${esc(item.customer)} · ${esc(item.product)}</b>
+        <div class="notif-pop-tags"><span class="notif-tag info">${isShip ? '📦 Ký gửi' : '🛍 Mua hộ'} · ${esc(item.status)}</span></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  pop.innerHTML = `
+    <div class="notif-pop-head">
+      <strong>🔔 Việc cần xử lý &amp; Công nợ mở (${items.length})</strong>
+      <button type="button" class="link-btn" onclick="scrollToTasksPanel()">Xem trên Dashboard →</button>
+    </div>
+    <div class="notif-pop-body">
+      ${rows || '<div class="notif-pop-empty">🎉 Tuyệt vời! Không còn việc tồn đọng hay công nợ mở nào.</div>'}
+    </div>
+  `;
+}
+
+function toggleNotifPopover(e) {
+  if (e) e.stopPropagation();
+  const pop = document.getElementById('notifPopover');
+  const btn = document.getElementById('notifBtn');
+  if (!pop) return;
+  const willOpen = pop.classList.contains('hidden');
+  if (willOpen) {
+    renderNotifPopover();
+    pop.classList.remove('hidden');
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+  } else {
+    closeNotifPopover();
+  }
+}
+
+function closeNotifPopover() {
+  document.getElementById('notifPopover')?.classList.add('hidden');
+  document.getElementById('notifBtn')?.setAttribute('aria-expanded', 'false');
+}
+
+document.addEventListener('click', e => {
+  const wrap = document.getElementById('notifWrap');
+  if (wrap && !wrap.contains(e.target)) {
+    closeNotifPopover();
+  }
+});
+
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
+    if (!document.getElementById('notifPopover')?.classList.contains('hidden')) {
+      closeNotifPopover();
+      return;
+    }
     if (document.getElementById('aiDrawerOverlay')?.classList.contains('open')) {
       closeAiDrawer();
       return;
@@ -6652,7 +6757,7 @@ function buildAppContextForDeepSeek() {
   return `MÀN HÌNH NGƯỜI DÙNG ĐANG MỞ TRƯỚC MẮT:
 - Trang hiện tại: ${viewNames[view] || view}
 - Vai trò đang chọn: ${currentUserRole}
-- Bộ lọc đang bật: Từ khóa="${query || 'không'}" | Trạng thái="${window.statusFilter || 'tất cả'}" | App/Sàn="${window.platformFilter || 'tất cả'}" | Chế độ kỳ="${periodMode}"
+- Bộ lọc đang bật: Từ khóa đang nhập=${query ? `"${query}"` : '(trống - không lọc)'} | Trạng thái=${window.statusFilter ? `"${window.statusFilter}"` : '(tất cả)'} | App/Sàn=${window.platformFilter ? `"${window.platformFilter}"` : '(tất cả)'} | Chế độ kỳ="${periodMode}"
 - Trạng thái đồng bộ 2 máy (Bạn & Minh): ${cleanFirebaseUrl(syncCfg.url) ? `Đã bật Firebase (Kho: ${cleanRoomId(syncCfg.room)}, đồng bộ lúc ${syncCfg.lastSyncAt || 'vừa xong'})` : 'Chưa gắn link Firebase (đang lưu cục bộ trên máy này)'}
 - Nội dung đang hiển thị trên màn hình: ${visibleScreenExcerpt || '(trống)'}
 
