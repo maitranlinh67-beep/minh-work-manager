@@ -3,6 +3,8 @@ const ROLE_KEY = 'dairycow-active-role';
 const THEME_KEY = 'dairycow-sidebar-theme';
 const SYNC_KEY = 'dairycow-cloud-sync-config';
 const SNAP_KEY = 'dairycow-auto-snapshots-v1';
+const AI_KEY = 'dairycow-deepseek-config';
+const AI_CHAT_KEY = 'dairycow-deepseek-chat-v1';
 const APP_TIMEZONE = 'Asia/Ho_Chi_Minh';
 const BIZ_CLOSE_DAY = 26;
 
@@ -6341,10 +6343,390 @@ document.addEventListener('visibilitychange', () => {
 });
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && document.getElementById('modal')?.classList.contains('open')) {
-    requestCloseModal();
+  if (e.key === 'Escape') {
+    if (document.getElementById('aiDrawerOverlay')?.classList.contains('open')) {
+      closeAiDrawer();
+      return;
+    }
+    if (document.getElementById('modal')?.classList.contains('open')) {
+      requestCloseModal();
+    }
   }
 });
+
+/* ============================================================
+   TRỢ LÝ AI DEEPSEEK (CHAT TỰ DO + TỔNG HỢP SỐ LIỆU THẬT APP)
+   Bảo mật: API Key chỉ lưu localStorage trên máy, KHÔNG lên GitHub.
+   ============================================================ */
+let aiSending = false;
+
+function loadAiConfig() {
+  try {
+    const raw = localStorage.getItem(AI_KEY);
+    if (raw) {
+      const p = JSON.parse(raw);
+      return {
+        apiKey: String(p.apiKey || '').trim(),
+        model: p.model === 'deepseek-reasoner' ? 'deepseek-reasoner' : 'deepseek-chat',
+        includeAppData: p.includeAppData !== false
+      };
+    }
+  } catch {}
+  return { apiKey: '', model: 'deepseek-chat', includeAppData: true };
+}
+
+function saveAiConfig(cfg) {
+  try { localStorage.setItem(AI_KEY, JSON.stringify(cfg)); } catch {}
+  updateAiStatusUI();
+}
+
+function loadAiChat() {
+  try {
+    const raw = localStorage.getItem(AI_CHAT_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr;
+    }
+  } catch {}
+  return [];
+}
+
+function saveAiChat(list) {
+  try { localStorage.setItem(AI_CHAT_KEY, JSON.stringify((list || []).slice(-30))); } catch {}
+}
+
+function updateAiStatusUI() {
+  const cfg = loadAiConfig();
+  const btn = document.getElementById('aiChatTopBtn');
+  const sub = document.getElementById('aiStatusSub');
+  const periodLbl = document.getElementById('aiContextPeriodLabel');
+  if (btn) btn.textContent = cfg.apiKey ? '🤖 Trợ lý AI ●' : '🤖 Trợ lý AI';
+  if (sub) sub.textContent = cfg.apiKey ? `Sẵn sàng (${cfg.model}) · Chỉ đọc dữ liệu` : 'Chưa gắn API Key — bấm ⚙ Key để dán 1 lần';
+  if (periodLbl) periodLbl.textContent = getPeriodLabel(getActivePeriodFilter());
+}
+
+function openAiDrawer() {
+  const overlay = document.getElementById('aiDrawerOverlay');
+  if (!overlay) return;
+  const cfg = loadAiConfig();
+  const keyInp = document.getElementById('aiApiKeyInput');
+  const modelSel = document.getElementById('aiModelSelect');
+  const toggleEl = document.getElementById('aiIncludeDataToggle');
+  if (keyInp) keyInp.value = cfg.apiKey;
+  if (modelSel) modelSel.value = cfg.model;
+  if (toggleEl) toggleEl.checked = cfg.includeAppData;
+  // Tự mở ô nhập Key nếu máy chưa dán Key
+  document.getElementById('aiSettingsPanel')?.classList.toggle('hidden', Boolean(cfg.apiKey));
+  updateAiStatusUI();
+  renderAiMessages();
+  overlay.classList.add('open');
+  setTimeout(() => {
+    if (cfg.apiKey) document.getElementById('aiInput')?.focus();
+    else keyInp?.focus();
+  }, 60);
+}
+
+function closeAiDrawer() {
+  document.getElementById('aiDrawerOverlay')?.classList.remove('open');
+}
+
+function toggleAiSettings() {
+  document.getElementById('aiSettingsPanel')?.classList.toggle('hidden');
+}
+
+function toggleAiIncludeData(checked) {
+  const cfg = loadAiConfig();
+  cfg.includeAppData = Boolean(checked);
+  saveAiConfig(cfg);
+  toast(cfg.includeAppData ? '📊 Đã bật đọc số liệu App cho DeepSeek' : '💬 Chế độ chat DeepSeek tự do (không gửi dữ liệu App)');
+}
+
+function saveAiSettingsUI() {
+  const apiKey = String(document.getElementById('aiApiKeyInput')?.value || '').trim();
+  const model = document.getElementById('aiModelSelect')?.value || 'deepseek-chat';
+  if (!apiKey) {
+    alert('Vui lòng dán DeepSeek API Key (bắt đầu bằng sk-...) trước khi lưu.');
+    return;
+  }
+  const cfg = loadAiConfig();
+  cfg.apiKey = apiKey;
+  cfg.model = model;
+  saveAiConfig(cfg);
+  document.getElementById('aiSettingsPanel')?.classList.add('hidden');
+  toast('✓ Đã lưu DeepSeek API Key trên máy này (không đẩy lên GitHub)');
+  document.getElementById('aiInput')?.focus();
+}
+
+function removeAiKey() {
+  if (!confirm('Xóa DeepSeek API Key khỏi trình duyệt máy này?')) return;
+  const cfg = loadAiConfig();
+  cfg.apiKey = '';
+  saveAiConfig(cfg);
+  const keyInp = document.getElementById('aiApiKeyInput');
+  if (keyInp) keyInp.value = '';
+  toast('Đã xóa DeepSeek API Key khỏi máy này');
+}
+
+function copyAiShareLink() {
+  const keyInp = document.getElementById('aiApiKeyInput');
+  const modelSel = document.getElementById('aiModelSelect');
+  const cfg = loadAiConfig();
+  const apiKey = String(keyInp?.value || cfg.apiKey || '').trim();
+  const model = modelSel?.value || cfg.model || 'deepseek-chat';
+  if (!apiKey) {
+    alert('Vui lòng dán DeepSeek API Key trước khi chép link cài sẵn gửi Minh!');
+    return;
+  }
+  cfg.apiKey = apiKey;
+  cfg.model = model;
+  saveAiConfig(cfg);
+
+  const payload = JSON.stringify({ k: apiKey, m: model });
+  const b64 = btoa(unescape(encodeURIComponent(payload)));
+  const pageUrl = window.location.origin + window.location.pathname;
+  const link = `${pageUrl}#ai=${encodeURIComponent(b64)}`;
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(link)
+      .then(() => toast('📋 Đã chép link cài sẵn AI! Gửi riêng cho Minh qua Zalo (không chia sẻ công khai).'))
+      .catch(() => prompt('Sao chép link cài sẵn AI gửi riêng cho Minh qua Zalo:', link));
+  } else {
+    prompt('Sao chép link cài sẵn AI gửi riêng cho Minh qua Zalo:', link);
+  }
+}
+
+function applyAiLinkFromUrl() {
+  try {
+    const hash = window.location.hash || '';
+    const match = hash.match(/ai=([^&]+)/);
+    if (!match) return false;
+    const raw = decodeURIComponent(match[1]);
+    const parsed = JSON.parse(decodeURIComponent(escape(atob(raw))));
+    if (parsed && parsed.k) {
+      const cfg = loadAiConfig();
+      cfg.apiKey = String(parsed.k).trim();
+      cfg.model = parsed.m === 'deepseek-reasoner' ? 'deepseek-reasoner' : 'deepseek-chat';
+      saveAiConfig(cfg);
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+      toast('🤖 Đã tự động cài xong Trợ lý AI DeepSeek trên máy này!');
+      setTimeout(() => openAiDrawer(), 350);
+      return true;
+    }
+  } catch (err) {
+    console.error('Lỗi đọc link cài AI:', err);
+  }
+  return false;
+}
+
+async function testDeepSeekKey() {
+  const keyInp = document.getElementById('aiApiKeyInput');
+  const apiKey = String(keyInp?.value || loadAiConfig().apiKey || '').trim();
+  if (!apiKey) {
+    alert('Vui lòng dán DeepSeek API Key trước khi kiểm tra!');
+    return;
+  }
+  toast('🔌 Đang kiểm tra kết nối DeepSeek API...');
+  try {
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [{ role: 'user', content: 'Trả lời ngắn gọn: OK' }],
+        max_tokens: 16
+      })
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      const msg = errData?.error?.message || `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    alert('✅ KẾT NỐI DEEPSEEK THÀNH CÔNG!\n\nKey hoạt động tốt. Bạn có thể bấm "✓ Lưu Key" và dùng ngay, hoặc bấm "📋 Chép link cài sẵn gửi Minh".');
+  } catch (err) {
+    alert(`❌ Chưa gọi được DeepSeek API (${err.message || 'Lỗi mạng'}).\n\nKiểm tra lại:\n1. Key có đúng định dạng sk-... và còn hoạt động trên platform.deepseek.com chưa?\n2. Tài khoản DeepSeek còn số dư (Balance) không?`);
+  }
+}
+
+function buildAppContextForDeepSeek() {
+  const filterSpec = getActivePeriodFilter();
+  const label = getPeriodLabel(filterSpec);
+  const selectedPeriodObj = periodMode === 'bizperiod' ? getSelectedBusinessPeriod() : null;
+  const s = (selectedPeriodObj && selectedPeriodObj.status === 'closed' && selectedPeriodObj.snapshot)
+    ? selectedPeriodObj.snapshot
+    : calcPeriodFinancials(filterSpec);
+  const liveAll = calcPeriodFinancials('');
+  const ordersInPeriod = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && matchesDateFilter(o.date, filterSpec));
+
+  // Thống kê theo App/Sàn trong kỳ
+  const byApp = {};
+  ordersInPeriod.forEach(o => {
+    const app = normalizePlatformName(o.platform) || 'Chưa gắn sàn';
+    if (!byApp[app]) byApp[app] = { count: 0, profit: 0, debt: 0 };
+    const m = calcOrderMetrics(o);
+    byApp[app].count += 1;
+    byApp[app].profit += m.netProfit;
+    byApp[app].debt += m.customerDebt;
+  });
+
+  // Danh sách khách đang còn nợ (toàn hệ thống - xuyên kỳ)
+  const debtMap = new Map();
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy').forEach(o => {
+    const m = calcOrderMetrics(o);
+    if (m.customerDebt > 0) {
+      const k = o.customer || 'Khách lẻ';
+      const cur = debtMap.get(k) || { customer: k, totalDebt: 0, orders: 0 };
+      cur.totalDebt += m.customerDebt;
+      cur.orders += 1;
+      debtMap.set(k, cur);
+    }
+  });
+  const topDebts = [...debtMap.values()].sort((a, b) => b.totalDebt - a.totalDebt).slice(0, 20);
+
+  const compactOrders = ordersInPeriod.slice(0, 35).map(o => {
+    const m = calcOrderMetrics(o);
+    return `- [${o.date}] ${o.code || ''} | ${o.customer} | ${o.lineType}${o.platform ? ` (${normalizePlatformName(o.platform)})` : ''} | ${o.product || o.goodsType} | Lãi: ${money(m.netProfit)}đ | Phải thu: ${money(m.totalCollectCustomer)}đ | Nợ: ${money(m.customerDebt)}đ | TT: ${o.status}`;
+  }).join('\n');
+
+  const appLines = Object.entries(byApp)
+    .sort((a, b) => b[1].profit - a[1].profit)
+    .map(([k, v]) => `- ${k}: ${v.count} đơn | Lãi ${money(v.profit)}đ | Nợ ${money(v.debt)}đ`)
+    .join('\n');
+
+  const debtLines = topDebts.length
+    ? topDebts.map(d => `- ${d.customer}: còn nợ ${money(d.totalDebt)}đ (${d.orders} đơn)`).join('\n')
+    : '- Không có khách hàng nào đang nợ.';
+
+  return `DỮ LIỆU THẬT TỪ ỨNG DỤNG DAIRYCOW LOGISTICS (Thời điểm: ${nowStamp(true)}, Múi giờ: ${APP_TIMEZONE})
+Kỳ đang xem: ${label}${selectedPeriodObj ? ` (${selectedPeriodObj.status === 'closed' ? 'ĐÃ CHỐT' : 'ĐANG HOẠT ĐỘNG'})` : ''}
+TỔNG HỢP KỲ ĐANG XEM:
+- Lưu lượng đơn: ${s.totalTrafficOrders || 0} đơn (${s.orderCount || 0} Note đơn, ${s.shipmentCount || 0} Ký gửi, ${s.purchaseCount || 0} Mua hộ)
+- Lợi nhuận thực tế kỳ này: ${money(s.netProfit || 0)} ₫ (Lãi cước: ${money(s.shipProfitTotal || 0)} ₫ | Phí DV: ${money(s.totalServiceRevenue || 0)} ₫ | Lãi đóng gói: ${money(s.packProfitTotal || 0)} ₫ | Lãi tỷ giá tệ: ${money(s.fxProfitTotal || 0)} ₫ | Chi phát sinh: -${money(s.totalIncidentalExpense || 0)} ₫)
+- Dòng tiền thu kỳ này: ${money(s.totalCollectedFromCustomer || 0)} ₫ (trong đó thu công nợ kỳ trước: ${money(s.debtRecoveryIn || 0)} ₫)
+- Dòng tiền chi/chuyển ra kỳ này: ${money(s.totalTransferredOut || 0)} ₫
+- Công nợ phát sinh mới trong kỳ: ${money(s.periodNewCustomerDebt || 0)} ₫
+- TỔNG CÔNG NỢ THỰC TẾ KHÁCH CÒN NỢ (Xuyên kỳ): ${money(liveAll.allCustomerDebt || 0)} ₫
+- Tổng cước kho chưa trả: ${money(liveAll.allWarehouseUnpaid || 0)} ₫
+
+THỐNG KÊ THEO APP / SÀN TRONG KỲ:
+${appLines || '- Chưa có đơn trong kỳ.'}
+
+TOP KHÁCH ĐANG CÒN NỢ (THỰC TẾ HIỆN TẠI):
+${debtLines}
+
+DANH SÁCH NOTE ĐƠN TRONG KỲ (tối đa 35 đơn gần nhất):
+${compactOrders || '- Chưa có Note đơn nào trong kỳ.'}`;
+}
+
+function formatAiMarkdown(raw) {
+  let s = esc(String(raw || ''));
+  s = s.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/\n/g, '<br>');
+  return s;
+}
+
+function renderAiMessages() {
+  const box = document.getElementById('aiMessages');
+  if (!box) return;
+  const msgs = loadAiChat();
+  if (!msgs.length) {
+    box.innerHTML = `<div class="ai-welcome">
+      <strong>👋 Xin chào! Tôi là Trợ lý AI DeepSeek của DAIRYCOW</strong>
+      <p>Bạn có thể bấm nhanh các nút gợi ý phía trên hoặc nhắn bất kỳ câu hỏi nào: tổng hợp lãi/công nợ kỳ này, thống kê theo sàn POIZON/1688/95分, dịch tiếng Trung hay soạn tin nhắn báo khách.</p>
+    </div>`;
+    return;
+  }
+  box.innerHTML = msgs.map(m => `
+    <div class="ai-msg ${m.role === 'user' ? 'is-user' : 'is-bot'}">
+      <div class="ai-bubble">${m.role === 'user' ? esc(m.content).replace(/\n/g, '<br>') : formatAiMarkdown(m.content)}</div>
+      ${m.time ? `<span class="ai-msg-time">${esc(m.time)}</span>` : ''}
+    </div>
+  `).join('') + (aiSending ? `<div class="ai-msg is-bot"><div class="ai-bubble ai-typing">DeepSeek đang phân tích...</div></div>` : '');
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearAiChat() {
+  if (!loadAiChat().length) return;
+  if (!confirm('Xóa toàn bộ lịch sử trò chuyện AI trên máy này? (Không ảnh hưởng dữ liệu đơn hàng).')) return;
+  saveAiChat([]);
+  renderAiMessages();
+}
+
+function handleAiSubmit(e) {
+  if (e) e.preventDefault();
+  const inp = document.getElementById('aiInput');
+  const text = String(inp?.value || '').trim();
+  if (!text) return;
+  if (inp) inp.value = '';
+  sendAiMessage(text);
+}
+
+async function sendAiMessage(text) {
+  if (aiSending) return;
+  const content = String(text || '').trim();
+  if (!content) return;
+
+  const cfg = loadAiConfig();
+  if (!cfg.apiKey) {
+    document.getElementById('aiSettingsPanel')?.classList.remove('hidden');
+    document.getElementById('aiApiKeyInput')?.focus();
+    toast('Vui lòng dán DeepSeek API Key vào mục ⚙ Key trước khi chat!');
+    return;
+  }
+
+  const msgs = loadAiChat();
+  msgs.push({ role: 'user', content, time: nowStamp() });
+  saveAiChat(msgs);
+  aiSending = true;
+  const sendBtn = document.getElementById('aiSendBtn');
+  if (sendBtn) sendBtn.disabled = true;
+  renderAiMessages();
+
+  const sysPrompt = cfg.includeAppData
+    ? `Bạn là Trợ lý AI thông minh của hệ thống quản lý Logistics & Tài chính DAIRYCOW LOGISTICS. Trả lời bằng tiếng Việt rõ ràng, ngắn gọn, chính xác.\nNGUYÊN TẮC BẮT BUỘC:\n1. Chỉ sử dụng đúng số liệu thật được cung cấp bên dưới, tuyệt đối KHÔNG bịa thêm số liệu.\n2. Phân biệt rõ Lợi nhuận thực tế với Dòng tiền thu và Công nợ kỳ trước.\n3. Nếu người dùng hỏi câu hỏi chung (dịch tiếng Trung, soạn tin nhắn, nghiệp vụ), vẫn trả lời tự nhiên hữu ích.\n\n${buildAppContextForDeepSeek()}`
+    : 'Bạn là Trợ lý AI DeepSeek hữu ích cho chủ shop Logistics Trung - Việt (DAIRYCOW LOGISTICS). Trả lời tiếng Việt tự nhiên, ngắn gọn, chính xác.';
+
+  const historyPayload = msgs.slice(-12).map(m => ({ role: m.role, content: m.content }));
+
+  try {
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${cfg.apiKey}`
+      },
+      body: JSON.stringify({
+        model: cfg.model || 'deepseek-chat',
+        messages: [{ role: 'system', content: sysPrompt }, ...historyPayload],
+        temperature: 0.3
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const errMsg = data?.error?.message || `HTTP ${res.status}`;
+      throw new Error(errMsg);
+    }
+    const reply = data?.choices?.[0]?.message?.content?.trim() || 'DeepSeek không trả về nội dung.';
+    msgs.push({ role: 'assistant', content: reply, time: nowStamp() });
+    saveAiChat(msgs);
+  } catch (err) {
+    msgs.push({
+      role: 'assistant',
+      content: `⚠ Không gọi được DeepSeek API: \`${err.message || 'Lỗi kết nối'}\`.\nHãy kiểm tra lại API Key hoặc số dư tài khoản tại platform.deepseek.com (bấm nút ⚙ Key ở góc trên).`,
+      time: nowStamp()
+    });
+    saveAiChat(msgs);
+  } finally {
+    aiSending = false;
+    if (sendBtn) sendBtn.disabled = false;
+    renderAiMessages();
+  }
+}
 
 window.addEventListener('beforeunload', e => {
   if (formDirty && document.getElementById('modal')?.classList.contains('open')) {
@@ -6374,8 +6756,10 @@ try {
 reconcileBusinessPeriods();
 render();
 updateSyncBadge();
+updateAiStatusUI();
 startCloudSyncLoop();
 startPeriodCloseWatcher();
+applyAiLinkFromUrl();
 if (!applySyncLinkFromUrl()) {
   const _initSyncCfg = loadSyncConfig();
   if (cleanFirebaseUrl(_initSyncCfg.url) && _initSyncCfg.autoSync) {

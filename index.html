@@ -143,6 +143,7 @@
           <strong id="breadcrumbCurrent">Dashboard</strong>
         </div>
         <div class="breadcrumb-tools">
+          <button type="button" class="bc-tool-btn ai-chip" id="aiChatTopBtn" onclick="openAiDrawer()" title="Mở Trợ lý AI DeepSeek (Chat & Tổng hợp số liệu App)">🤖 Trợ lý AI</button>
           <button type="button" class="bc-tool-btn primary-chip" id="syncTopBtn" onclick="openSyncModal()" title="Đồng bộ dữ liệu 2 chiều giữa nhiều máy & Khôi phục 10 bản dự phòng tự động">☁ Đồng bộ & Sao lưu</button>
           <button type="button" class="bc-tool-btn" onclick="openRoleModal()" title="Thiết lập phân quyền người dùng">🛡 Phân quyền (<span id="activeRoleNavLabel">Admin</span>)</button>
           <button type="button" class="bc-tool-btn" onclick="openHistoryTab()" title="Xem lịch sử mọi lần chỉnh sửa">🕒 Lịch sử</button>
@@ -201,6 +202,69 @@
         </div>
       </form>
     </div>
+  </div>
+
+  <!-- NGĂN KÉO TRỢ LÝ AI DEEPSEEK (CHỈ ĐỌC & TƯ VẤN, KHÔNG SỬA DỮ LIỆU GỐC) -->
+  <div class="ai-drawer-overlay" id="aiDrawerOverlay" onclick="if(event.target===this)closeAiDrawer()" role="dialog" aria-modal="true" aria-label="Trợ lý AI DeepSeek">
+    <aside class="ai-drawer" id="aiDrawer">
+      <div class="ai-drawer-head">
+        <div class="ai-drawer-title">
+          <span class="ai-drawer-ico">🤖</span>
+          <div>
+            <strong>Trợ lý AI DeepSeek</strong>
+            <small id="aiStatusSub">Chat &amp; Tổng hợp dữ liệu DAIRYCOW</small>
+          </div>
+        </div>
+        <div class="ai-drawer-head-actions">
+          <button type="button" class="iconbtn" onclick="toggleAiSettings()" title="Cài đặt API Key DeepSeek">⚙ Key</button>
+          <button type="button" class="iconbtn" onclick="clearAiChat()" title="Xóa lịch sử hội thoại">🗑</button>
+          <button type="button" class="xbtn" onclick="closeAiDrawer()" aria-label="Đóng Trợ lý AI">×</button>
+        </div>
+      </div>
+
+      <div class="ai-settings-panel hidden" id="aiSettingsPanel">
+        <div class="ai-settings-note">
+          🔒 <b>Bảo mật tuyệt đối:</b> API Key chỉ lưu riêng trên trình duyệt máy này (<code>localStorage</code>), <b>không đẩy lên GitHub</b>.
+        </div>
+        <div class="field-group">
+          <label for="aiApiKeyInput">DeepSeek API Key (sk-...)</label>
+          <input id="aiApiKeyInput" class="field" type="password" autocomplete="off" placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx" />
+        </div>
+        <div class="ai-settings-row">
+          <select id="aiModelSelect" class="select" aria-label="Chọn model DeepSeek">
+            <option value="deepseek-chat">deepseek-chat (Nhanh · Rẻ · Khuyên dùng)</option>
+            <option value="deepseek-reasoner">deepseek-reasoner (Suy luận sâu R1)</option>
+          </select>
+          <button type="button" class="btn small primary" onclick="saveAiSettingsUI()">✓ Lưu Key</button>
+        </div>
+        <div class="ai-settings-actions">
+          <button type="button" class="btn small" onclick="testDeepSeekKey()">🔌 Kiểm tra Key</button>
+          <button type="button" class="btn small" onclick="copyAiShareLink()">📋 Chép link cài sẵn gửi Minh</button>
+          <button type="button" class="btn small danger-outline" onclick="removeAiKey()">Xóa Key</button>
+        </div>
+      </div>
+
+      <div class="ai-context-bar">
+        <label class="ai-context-toggle">
+          <input type="checkbox" id="aiIncludeDataToggle" checked onchange="toggleAiIncludeData(this.checked)" />
+          <span>📊 Đọc số liệu thật trong App (<b id="aiContextPeriodLabel">Kỳ hiện tại</b>)</span>
+        </label>
+      </div>
+
+      <div class="ai-quick-prompts">
+        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Tổng hợp nhanh tình hình kinh doanh, lợi nhuận, dòng tiền và công nợ của kỳ hiện tại.')">📊 Tổng hợp kỳ này</button>
+        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Liệt kê chi tiết các khách hàng đang còn nợ và tổng số tiền cần thu.')">⚠️ Khách còn nợ</button>
+        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Thống kê số lượng đơn và lợi nhuận theo từng App/Sàn (POIZON, 1688, TAOBAO...) trong kỳ này.')">🛍 Lãi theo Sàn</button>
+        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Viết giúp tôi 1 tin nhắn Zalo lịch sự, ngắn gọn để báo tổng tiền và nhắc khách thanh toán công nợ.')">✉️ Soạn tin nhắc nợ</button>
+      </div>
+
+      <div class="ai-messages" id="aiMessages"></div>
+
+      <form class="ai-input-bar" onsubmit="handleAiSubmit(event)">
+        <textarea id="aiInput" class="field ai-textarea" rows="1" placeholder="Hỏi DeepSeek bất cứ điều gì (VD: Kỳ này lãi bao nhiêu? Dịch tiếng Trung...)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();handleAiSubmit(event);}"></textarea>
+        <button type="submit" class="btn primary ai-send-btn" id="aiSendBtn">Gửi</button>
+      </form>
+    </aside>
   </div>
 
   <datalist id="customerSuggestions"></datalist>
