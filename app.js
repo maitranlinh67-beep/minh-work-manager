@@ -6400,9 +6400,43 @@ function updateAiStatusUI() {
   const btn = document.getElementById('aiChatTopBtn');
   const sub = document.getElementById('aiStatusSub');
   const periodLbl = document.getElementById('aiContextPeriodLabel');
+  const ctxBtn = document.getElementById('aiIncludeDataBtn');
+  const fabDot = document.getElementById('aiFabDot');
+  const modelSel = document.getElementById('aiModelSelect');
   if (btn) btn.textContent = cfg.apiKey ? '🤖 Trợ lý AI ●' : '🤖 Trợ lý AI';
-  if (sub) sub.textContent = cfg.apiKey ? `Sẵn sàng (${cfg.model}) · Chỉ đọc dữ liệu` : 'Chưa gắn API Key — bấm ⚙ Key để dán 1 lần';
-  if (periodLbl) periodLbl.textContent = getPeriodLabel(getActivePeriodFilter());
+  if (sub) sub.textContent = cfg.apiKey ? `Sẵn sàng · ${cfg.model === 'deepseek-reasoner' ? 'DeepSeek R1' : 'DeepSeek Chat'}` : 'Chưa gắn API Key — bấm ⚙ Key';
+  if (periodLbl) periodLbl.textContent = cfg.includeAppData ? `App: ${getSelectedBusinessPeriod().shortLabel}` : 'Chat tự do';
+  if (ctxBtn) ctxBtn.classList.toggle('active', Boolean(cfg.includeAppData));
+  if (fabDot) fabDot.classList.toggle('online', Boolean(cfg.apiKey));
+  if (modelSel) modelSel.value = cfg.model;
+}
+
+function toggleAiDrawer() {
+  const overlay = document.getElementById('aiDrawerOverlay');
+  if (!overlay) return;
+  if (overlay.classList.contains('open')) closeAiDrawer();
+  else openAiDrawer();
+}
+
+function toggleAiExpand() {
+  const popup = document.getElementById('aiDrawerOverlay');
+  if (!popup) return;
+  const isWide = popup.classList.toggle('expanded');
+  const btn = document.getElementById('aiExpandBtn');
+  if (btn) btn.textContent = isWide ? '⤡' : '⤢';
+}
+
+function autoGrowAiInput(el) {
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = Math.min(130, el.scrollHeight) + 'px';
+}
+
+function onChangeAiModel(modelVal) {
+  const cfg = loadAiConfig();
+  cfg.model = modelVal === 'deepseek-reasoner' ? 'deepseek-reasoner' : 'deepseek-chat';
+  saveAiConfig(cfg);
+  toast(`Đã chuyển sang ${cfg.model === 'deepseek-reasoner' ? 'DeepSeek R1 (Suy luận sâu)' : 'DeepSeek Chat (Nhanh)'}`);
 }
 
 function openAiDrawer() {
@@ -6411,15 +6445,14 @@ function openAiDrawer() {
   const cfg = loadAiConfig();
   const keyInp = document.getElementById('aiApiKeyInput');
   const modelSel = document.getElementById('aiModelSelect');
-  const toggleEl = document.getElementById('aiIncludeDataToggle');
   if (keyInp) keyInp.value = cfg.apiKey;
   if (modelSel) modelSel.value = cfg.model;
-  if (toggleEl) toggleEl.checked = cfg.includeAppData;
   // Tự mở ô nhập Key nếu máy chưa dán Key
   document.getElementById('aiSettingsPanel')?.classList.toggle('hidden', Boolean(cfg.apiKey));
   updateAiStatusUI();
   renderAiMessages();
   overlay.classList.add('open');
+  document.getElementById('aiFabBtn')?.classList.add('is-open');
   setTimeout(() => {
     if (cfg.apiKey) document.getElementById('aiInput')?.focus();
     else keyInp?.focus();
@@ -6428,15 +6461,16 @@ function openAiDrawer() {
 
 function closeAiDrawer() {
   document.getElementById('aiDrawerOverlay')?.classList.remove('open');
+  document.getElementById('aiFabBtn')?.classList.remove('is-open');
 }
 
 function toggleAiSettings() {
   document.getElementById('aiSettingsPanel')?.classList.toggle('hidden');
 }
 
-function toggleAiIncludeData(checked) {
+function toggleAiIncludeData(forceVal) {
   const cfg = loadAiConfig();
-  cfg.includeAppData = Boolean(checked);
+  cfg.includeAppData = typeof forceVal === 'boolean' ? forceVal : !cfg.includeAppData;
   saveAiConfig(cfg);
   toast(cfg.includeAppData ? '📊 Đã bật đọc số liệu App cho DeepSeek' : '💬 Chế độ chat DeepSeek tự do (không gửi dữ liệu App)');
 }
@@ -6630,29 +6664,52 @@ function formatAiMarkdown(raw) {
   return s;
 }
 
+function copyAiMessageText(idx) {
+  const msgs = loadAiChat();
+  const text = msgs[idx]?.content || '';
+  if (!text) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('📋 Đã chép câu trả lời'));
+  }
+}
+
 function renderAiMessages() {
   const box = document.getElementById('aiMessages');
   if (!box) return;
   const msgs = loadAiChat();
+  const quickEl = document.getElementById('aiQuickPrompts');
+  if (quickEl) quickEl.classList.toggle('compact', msgs.length > 0);
   if (!msgs.length) {
     box.innerHTML = `<div class="ai-welcome">
-      <strong>👋 Xin chào! Tôi là Trợ lý AI DeepSeek của DAIRYCOW</strong>
-      <p>Bạn có thể bấm nhanh các nút gợi ý phía trên hoặc nhắn bất kỳ câu hỏi nào: tổng hợp lãi/công nợ kỳ này, thống kê theo sàn POIZON/1688/95分, dịch tiếng Trung hay soạn tin nhắn báo khách.</p>
+      <div class="ai-welcome-ico">✦</div>
+      <strong>DeepSeek AI · DAIRYCOW</strong>
+      <p>Hỏi tự do như ChatGPT hoặc tổng hợp lãi, công nợ, đơn theo sàn POIZON/1688/95分 ngay tại đây.</p>
     </div>`;
     return;
   }
-  box.innerHTML = msgs.map(m => `
-    <div class="ai-msg ${m.role === 'user' ? 'is-user' : 'is-bot'}">
-      <div class="ai-bubble">${m.role === 'user' ? esc(m.content).replace(/\n/g, '<br>') : formatAiMarkdown(m.content)}</div>
-      ${m.time ? `<span class="ai-msg-time">${esc(m.time)}</span>` : ''}
-    </div>
-  `).join('') + (aiSending ? `<div class="ai-msg is-bot"><div class="ai-bubble ai-typing">DeepSeek đang phân tích...</div></div>` : '');
+  box.innerHTML = msgs.map((m, idx) => m.role === 'user'
+    ? `<div class="ai-msg is-user">
+        <div class="ai-bubble">${esc(m.content).replace(/\n/g, '<br>')}</div>
+      </div>`
+    : `<div class="ai-msg is-bot">
+        <div class="ai-bot-row">
+          <span class="ai-bot-avatar" aria-hidden="true">✦</span>
+          <div class="ai-bot-body">
+            <div class="ai-bubble">${formatAiMarkdown(m.content)}</div>
+            <div class="ai-bot-meta">
+              <span>${esc(m.time || '')}</span>
+              <button type="button" class="ai-copy-btn" onclick="copyAiMessageText(${idx})" title="Sao chép">📋 Chép</button>
+            </div>
+          </div>
+        </div>
+      </div>`
+  ).join('') + (aiSending ? `<div class="ai-msg is-bot"><div class="ai-bot-row"><span class="ai-bot-avatar" aria-hidden="true">✦</span><div class="ai-bubble ai-typing">DeepSeek đang suy nghĩ<span>.</span><span>.</span><span>.</span></div></div></div>` : '');
   box.scrollTop = box.scrollHeight;
 }
 
 function clearAiChat() {
   if (!loadAiChat().length) return;
-  if (!confirm('Xóa toàn bộ lịch sử trò chuyện AI trên máy này? (Không ảnh hưởng dữ liệu đơn hàng).')) return;
+  if (!confirm('Bắt đầu cuộc trò chuyện mới? (Không ảnh hưởng dữ liệu đơn hàng).')) return;
   saveAiChat([]);
   renderAiMessages();
 }
@@ -6662,7 +6719,10 @@ function handleAiSubmit(e) {
   const inp = document.getElementById('aiInput');
   const text = String(inp?.value || '').trim();
   if (!text) return;
-  if (inp) inp.value = '';
+  if (inp) {
+    inp.value = '';
+    inp.style.height = 'auto';
+  }
   sendAiMessage(text);
 }
 

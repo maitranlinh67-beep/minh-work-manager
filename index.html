@@ -204,68 +204,79 @@
     </div>
   </div>
 
-  <!-- NGĂN KÉO TRỢ LÝ AI DEEPSEEK (CHỈ ĐỌC & TƯ VẤN, KHÔNG SỬA DỮ LIỆU GỐC) -->
-  <div class="ai-drawer-overlay" id="aiDrawerOverlay" onclick="if(event.target===this)closeAiDrawer()" role="dialog" aria-modal="true" aria-label="Trợ lý AI DeepSeek">
-    <aside class="ai-drawer" id="aiDrawer">
+  <!-- BONG BÓNG CHAT AI DEEPSEEK GÓC PHẢI DƯỚI & KHUNG CHAT CHUẨN CHATGPT / GEMINI -->
+  <button type="button" class="ai-fab" id="aiFabBtn" onclick="toggleAiDrawer()" title="Mở Trợ lý AI DeepSeek (Chat & Tổng hợp dữ liệu)" aria-label="Mở Trợ lý AI DeepSeek">
+    <span class="ai-fab-ring" aria-hidden="true"></span>
+    <span class="ai-fab-ico" aria-hidden="true">✦</span>
+    <span class="ai-fab-label">AI</span>
+    <span class="ai-fab-dot" id="aiFabDot" aria-hidden="true"></span>
+  </button>
+
+  <aside class="ai-chat-popup" id="aiDrawerOverlay" role="dialog" aria-modal="false" aria-label="Trợ lý AI DeepSeek">
+    <div class="ai-drawer" id="aiDrawer">
       <div class="ai-drawer-head">
         <div class="ai-drawer-title">
-          <span class="ai-drawer-ico">🤖</span>
+          <span class="ai-drawer-ico">✦</span>
           <div>
-            <strong>Trợ lý AI DeepSeek</strong>
-            <small id="aiStatusSub">Chat &amp; Tổng hợp dữ liệu DAIRYCOW</small>
+            <strong>DeepSeek AI</strong>
+            <small id="aiStatusSub">Trợ lý DAIRYCOW · Chỉ đọc dữ liệu</small>
           </div>
         </div>
         <div class="ai-drawer-head-actions">
-          <button type="button" class="iconbtn" onclick="toggleAiSettings()" title="Cài đặt API Key DeepSeek">⚙ Key</button>
-          <button type="button" class="iconbtn" onclick="clearAiChat()" title="Xóa lịch sử hội thoại">🗑</button>
-          <button type="button" class="xbtn" onclick="closeAiDrawer()" aria-label="Đóng Trợ lý AI">×</button>
+          <button type="button" class="ai-head-btn" onclick="toggleAiSettings()" title="Cài đặt API Key DeepSeek">⚙ Key</button>
+          <button type="button" class="ai-head-btn" id="aiExpandBtn" onclick="toggleAiExpand()" title="Mở rộng / Thu nhỏ khung chat">⤢</button>
+          <button type="button" class="ai-head-btn" onclick="clearAiChat()" title="Cuộc trò chuyện mới">＋</button>
+          <button type="button" class="ai-head-btn" onclick="closeAiDrawer()" aria-label="Thu gọn Trợ lý AI" title="Thu gọn">✕</button>
         </div>
       </div>
 
       <div class="ai-settings-panel hidden" id="aiSettingsPanel">
         <div class="ai-settings-note">
-          🔒 <b>Bảo mật tuyệt đối:</b> API Key chỉ lưu riêng trên trình duyệt máy này (<code>localStorage</code>), <b>không đẩy lên GitHub</b>.
+          🔒 <b>Bảo mật:</b> Key chỉ lưu trên trình duyệt máy này (<code>localStorage</code>), <b>không đẩy lên GitHub</b>.
         </div>
         <div class="field-group">
           <label for="aiApiKeyInput">DeepSeek API Key (sk-...)</label>
           <input id="aiApiKeyInput" class="field" type="password" autocomplete="off" placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx" />
         </div>
-        <div class="ai-settings-row">
-          <select id="aiModelSelect" class="select" aria-label="Chọn model DeepSeek">
-            <option value="deepseek-chat">deepseek-chat (Nhanh · Rẻ · Khuyên dùng)</option>
-            <option value="deepseek-reasoner">deepseek-reasoner (Suy luận sâu R1)</option>
-          </select>
-          <button type="button" class="btn small primary" onclick="saveAiSettingsUI()">✓ Lưu Key</button>
-        </div>
         <div class="ai-settings-actions">
-          <button type="button" class="btn small" onclick="testDeepSeekKey()">🔌 Kiểm tra Key</button>
-          <button type="button" class="btn small" onclick="copyAiShareLink()">📋 Chép link cài sẵn gửi Minh</button>
-          <button type="button" class="btn small danger-outline" onclick="removeAiKey()">Xóa Key</button>
+          <button type="button" class="btn small primary" onclick="saveAiSettingsUI()">✓ Lưu Key</button>
+          <button type="button" class="btn small" onclick="testDeepSeekKey()">🔌 Kiểm tra</button>
+          <button type="button" class="btn small" onclick="copyAiShareLink()">📋 Gửi link cho Minh</button>
+          <button type="button" class="btn small danger-outline" onclick="removeAiKey()">Xóa</button>
         </div>
-      </div>
-
-      <div class="ai-context-bar">
-        <label class="ai-context-toggle">
-          <input type="checkbox" id="aiIncludeDataToggle" checked onchange="toggleAiIncludeData(this.checked)" />
-          <span>📊 Đọc số liệu thật trong App (<b id="aiContextPeriodLabel">Kỳ hiện tại</b>)</span>
-        </label>
-      </div>
-
-      <div class="ai-quick-prompts">
-        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Tổng hợp nhanh tình hình kinh doanh, lợi nhuận, dòng tiền và công nợ của kỳ hiện tại.')">📊 Tổng hợp kỳ này</button>
-        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Liệt kê chi tiết các khách hàng đang còn nợ và tổng số tiền cần thu.')">⚠️ Khách còn nợ</button>
-        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Thống kê số lượng đơn và lợi nhuận theo từng App/Sàn (POIZON, 1688, TAOBAO...) trong kỳ này.')">🛍 Lãi theo Sàn</button>
-        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Viết giúp tôi 1 tin nhắn Zalo lịch sự, ngắn gọn để báo tổng tiền và nhắc khách thanh toán công nợ.')">✉️ Soạn tin nhắc nợ</button>
       </div>
 
       <div class="ai-messages" id="aiMessages"></div>
 
-      <form class="ai-input-bar" onsubmit="handleAiSubmit(event)">
-        <textarea id="aiInput" class="field ai-textarea" rows="1" placeholder="Hỏi DeepSeek bất cứ điều gì (VD: Kỳ này lãi bao nhiêu? Dịch tiếng Trung...)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();handleAiSubmit(event);}"></textarea>
-        <button type="submit" class="btn primary ai-send-btn" id="aiSendBtn">Gửi</button>
+      <div class="ai-quick-prompts" id="aiQuickPrompts">
+        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Tổng hợp nhanh tình hình kinh doanh, lợi nhuận, dòng tiền và công nợ của kỳ hiện tại.')">📊 Tổng hợp kỳ này</button>
+        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Liệt kê chi tiết các khách hàng đang còn nợ và tổng số tiền cần thu.')">⚠️ Khách còn nợ</button>
+        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Thống kê số lượng đơn và lợi nhuận theo từng App/Sàn (POIZON, 1688, TAOBAO...) trong kỳ này.')">🛍 Lãi theo Sàn</button>
+        <button type="button" class="ai-qbtn" onclick="sendAiMessage('Viết giúp tôi 1 tin nhắn Zalo lịch sự, ngắn gọn để báo tổng tiền và nhắc khách thanh toán công nợ.')">✉️ Nhắc nợ Zalo</button>
+      </div>
+
+      <form class="ai-composer-wrap" onsubmit="handleAiSubmit(event)">
+        <div class="ai-composer-box">
+          <textarea id="aiInput" class="ai-composer-textarea" rows="1" placeholder="Hỏi DeepSeek bất cứ điều gì..." oninput="autoGrowAiInput(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();handleAiSubmit(event);}"></textarea>
+          <div class="ai-composer-toolbar">
+            <div class="ai-composer-left">
+              <button type="button" class="ai-ctx-pill active" id="aiIncludeDataBtn" onclick="toggleAiIncludeData()" title="Bật/tắt gửi kèm số liệu thật của kỳ đang xem">
+                <span class="ai-ctx-dot"></span>
+                <span id="aiContextPeriodLabel">Dữ liệu App</span>
+              </button>
+              <select id="aiModelSelect" class="ai-model-select" aria-label="Chọn model DeepSeek" onchange="onChangeAiModel(this.value)">
+                <option value="deepseek-chat">DeepSeek Chat</option>
+                <option value="deepseek-reasoner">DeepSeek R1</option>
+              </select>
+            </div>
+            <button type="submit" class="ai-send-circle" id="aiSendBtn" title="Gửi câu hỏi (Enter)" aria-label="Gửi tin nhắn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+            </button>
+          </div>
+        </div>
       </form>
-    </aside>
-  </div>
+    </div>
+  </aside>
 
   <datalist id="customerSuggestions"></datalist>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
