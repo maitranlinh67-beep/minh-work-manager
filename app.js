@@ -92,6 +92,7 @@ let lastActiveBizPeriodId = '';
 let periodWatcherTimer = null;
 window.statusFilter = '';
 window.platformFilter = '';
+window.ordersPeriodOnly = false;
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -2185,13 +2186,14 @@ function clearFilters() {
   query = '';
   window.statusFilter = '';
   window.platformFilter = '';
+  window.ordersPeriodOnly = false;
   render();
 }
 
 function handleSearch(inputEl) {
   query = inputEl.value;
   document.getElementById('searchClearBtn')?.classList.toggle('hidden', !query);
-  document.getElementById('resetFilterBtn')?.classList.toggle('hidden', !(query || window.statusFilter || window.platformFilter));
+  document.getElementById('resetFilterBtn')?.classList.toggle('hidden', !(query || window.statusFilter || window.platformFilter || window.ordersPeriodOnly));
   updateTableResults();
 }
 
@@ -2203,7 +2205,7 @@ function clearSearchInput() {
     input.focus();
   }
   document.getElementById('searchClearBtn')?.classList.add('hidden');
-  document.getElementById('resetFilterBtn')?.classList.toggle('hidden', !(window.statusFilter || window.platformFilter));
+  document.getElementById('resetFilterBtn')?.classList.toggle('hidden', !(window.statusFilter || window.platformFilter || window.ordersPeriodOnly));
   updateTableResults();
 }
 
@@ -2218,6 +2220,8 @@ function updateTableResults() {
     const data = getOrdersViewData();
     area.innerHTML = data.tableHtml;
     if (countEl) countEl.textContent = `${data.filteredCount} / ${data.totalCount} đơn`;
+    const sumEl = document.getElementById('ordersSummaryBar');
+    if (sumEl) sumEl.outerHTML = data.summaryHtml;
   } else if (view === 'incidentals') {
     if (incTab === 'extraship') {
       const data = getExtraShipViewData();
@@ -2702,10 +2706,97 @@ function loadSampleOrderNotes() {
 // ============================================================================
 // TRANG 2: MỤC NOTE ĐƠN · DỊCH VỤ ĐÓNG GÓI & BẢNG TÍNH LÃI
 // ============================================================================
+function copyTextSafe(text, okMsg = '📋 Đã sao chép vào bộ nhớ tạm') {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast(okMsg)).catch(() => prompt('Sao chép nội dung:', text));
+  } else {
+    prompt('Sao chép nội dung:', text);
+  }
+}
+
+function copyOrderBillZalo(orderId) {
+  const o = (db.orderNotes || []).find(x => x.id === orderId);
+  if (!o) return;
+  const m = calcOrderMetrics(o);
+  const lines = [
+    `🐄 DAIRYCOW LOGISTICS — THÔNG TIN ĐƠN HÀNG`,
+    `• Khách hàng: ${o.customer}${o.code ? ` (${o.code})` : ''}`,
+    `• Mặt hàng: ${o.product || o.goodsType} (${o.packages || 1} kiện · ${o.lineType}${o.platform ? ' · ' + normalizePlatformName(o.platform) : ''})`,
+    o.waybill ? `• Mã vận đơn: ${o.waybill}` : '',
+    `• Ngày đơn: ${dateText(o.date)} · Trạng thái: ${o.status}`,
+    `-----------------------`,
+    m.finalGoodsVnd > 0 ? `• Giá trị hàng: ${money(m.finalGoodsVnd)} ₫` : '',
+    m.serviceFee > 0 ? `• Phí dịch vụ: ${money(m.serviceFee)} ₫` : '',
+    m.packCharge > 0 ? `• Phí đóng gói (${o.packagingType || 'Đóng gói'}): ${money(m.packCharge)} ₫` : '',
+    m.extraShipTotal > 0 ? `• Cước ship phát sinh: ${money(m.extraShipTotal)} ₫` : '',
+    m.shipCharge > 0 ? `• Cước vận chuyển (tính riêng): ${money(m.shipCharge)} ₫` : '',
+    `👉 Tổng phải thu đơn: ${money(m.totalCollectCustomer)} ₫`,
+    `• Đã thanh toán: ${money(m.customerPaid)} ₫`,
+    `• CÒN LẠI CẦN THANH TOÁN: ${money(m.customerDebt)} ₫`
+  ].filter(Boolean).join('\n');
+  copyTextSafe(lines, `📋 Đã chép phiếu báo khách ${o.customer} — dán gửi Zalo được ngay!`);
+}
+
+function copyCustomerDebtZalo(custKey) {
+  const c = uniqueCustomers().find(o => (o.code || o.phone || o.customer).toLowerCase() === String(custKey || '').toLowerCase());
+  if (!c) return;
+  const unpaidOrders = (db.orderNotes || []).filter(x => x.status !== 'Đã hủy' && sameCustomer(x, c) && calcOrderMetrics(x).customerDebt > 0);
+  const unlinkedExtras = (db.extraShipments || []).filter(x => !isExtraShipLinkedToOrder(x) && sameCustomer(x, c) && (Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x)) > 0);
+  let totalDebt = 0;
+  const detailLines = [];
+  unpaidOrders.forEach((o, idx) => {
+    const m = calcOrderMetrics(o);
+    totalDebt += m.customerDebt;
+    detailLines.push(`${idx + 1}. [${dateText(o.date)}] ${o.product || o.goodsType}${o.platform ? ` (${normalizePlatformName(o.platform)})` : ''}: còn ${money(m.customerDebt)} ₫`);
+  });
+  unlinkedExtras.forEach(x => {
+    const rem = Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x));
+    totalDebt += rem;
+    detailLines.push(`${detailLines.length + 1}. [${dateText(x.date)}] Cước ship PS (${x.content || ''}): còn ${money(rem)} ₫`);
+  });
+  if (totalDebt <= 0) {
+    toast('Khách hàng này hiện không còn khoản nợ nào.');
+    return;
+  }
+  const msg = [
+    `🐄 DAIRYCOW LOGISTICS xin phép gửi bảng đối chiếu công nợ của ${c.customer}:`,
+    ...detailLines,
+    `-----------------------`,
+    `👉 TỔNG CỘNG CẦN THANH TOÁN: ${money(totalDebt)} ₫`,
+    `Bạn kiểm tra giúp shop nhé, cảm ơn bạn nhiều ạ!`
+  ].join('\n');
+  copyTextSafe(msg, `📋 Đã chép phiếu nhắc nợ ${c.customer} (${money(totalDebt)} ₫)`);
+}
+
+function exportOrdersCsv() {
+  const rows = [
+    ['Ngày đơn', 'Mã KH', 'Khách hàng', 'SĐT', 'Line', 'App/Sàn', 'Loại hàng', 'Mặt hàng', 'Số kiện', 'Mã VĐ', 'Giá hàng VND', 'Phí DV', 'Cước gốc kho', 'Cước thu khách', 'Vốn đóng gói', 'Thu đóng gói', 'Cước ship PS', 'Tổng phải thu', 'Khách đã trả', 'Khách còn nợ', 'Lợi nhuận thực tế', 'Trạng thái']
+  ];
+  (db.orderNotes || []).forEach(o => {
+    const m = calcOrderMetrics(o);
+    rows.push([
+      o.date || '', o.code || '', o.customer || '', o.phone || '', o.lineType || '',
+      normalizePlatformName(o.platform || ''), o.goodsType || '', o.product || '', o.packages || 1, o.waybill || '',
+      m.finalGoodsVnd, m.serviceFee, m.shipCost, m.shipCharge, m.packCost, m.packCharge, m.extraShipTotal,
+      m.totalCollectCustomer, m.customerPaid, m.customerDebt, m.netProfit, o.status || ''
+    ]);
+  });
+  const csv = '\uFEFF' + rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `dairycow-note-don-${dateKey()}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 500);
+  toast('📊 Đã xuất file Excel (.csv) danh sách Note đơn');
+}
+
 function getOrdersViewData() {
   const q = query.toLowerCase();
   const all = db.orderNotes || [];
+  const activeBp = getSelectedBusinessPeriod();
   const filtered = all.filter(o => {
+    if (window.ordersPeriodOnly && !matchesDateFilter(o.date, { startDate: activeBp.startDate, endDate: activeBp.endDate })) return false;
     const packNames = Array.isArray(o.packagingItems) ? o.packagingItems.map(x => x.name).join(' ') : '';
     const normPlat = normalizePlatformName(o.platform);
     const text = `${o.lineType} ${normPlat} ${o.platform || ''} ${o.customer} ${o.phone || ''} ${o.code || ''} ${o.waybill || ''} ${o.goodsType} ${o.packagingType || ''} ${packNames} ${o.product || ''} ${o.note || ''} ${o.status}`.toLowerCase();
@@ -2791,6 +2882,7 @@ function getOrdersViewData() {
           <div class="row-actions" style="margin-top:2px">
             ${m.customerDebt > 0 ? `<button type="button" class="iconbtn primary-tint" onclick="settleOrderDebt('${o.id}','customer')">Thu đủ</button>` : ''}
             ${m.warehouseDebt > 0 ? `<button type="button" class="iconbtn" onclick="settleOrderDebt('${o.id}','warehouse')">Đã trả cước kho</button>` : ''}
+            <button type="button" class="iconbtn" onclick="copyOrderBillZalo('${o.id}')" title="Sao chép chi tiết đơn gửi Zalo cho khách">📋 Báo khách</button>
             <button type="button" class="iconbtn" onclick="editRecord('order','${o.id}')">Sửa</button>
             <button type="button" class="iconbtn danger-tint" onclick="deleteItemDirect('order','${o.id}')">Xóa</button>
           </div>
@@ -2799,8 +2891,28 @@ function getOrdersViewData() {
     </tr>`;
   }).join('');
 
+  let sumPkgs = 0, sumCollect = 0, sumPaid = 0, sumDebt = 0, sumProfit = 0;
+  filtered.forEach(o => {
+    if (o.status === 'Đã hủy') return;
+    const m = calcOrderMetrics(o);
+    sumPkgs += Number(o.packages || 1);
+    sumCollect += m.totalCollectCustomer;
+    sumPaid += m.customerPaid;
+    sumDebt += m.customerDebt;
+    sumProfit += m.netProfit;
+  });
+
+  const hideProfit = currentUserRole === 'warehouse';
+  const summaryHtml = `<div class="orders-summary-bar" id="ordersSummaryBar">
+    <div class="osb-item"><span>Đang hiển thị</span><b>${filtered.length} đơn (${numFmt(sumPkgs)} kiện)</b></div>
+    <div class="osb-item"><span>Tổng phải thu</span><b>${money(sumCollect)} ₫</b></div>
+    <div class="osb-item"><span>Khách đã trả</span><b class="income-color">${money(sumPaid)} ₫</b></div>
+    <div class="osb-item"><span>Khách còn nợ</span><b class="${sumDebt > 0 ? 'expense-color' : 'income-color'}">${money(sumDebt)} ₫</b></div>
+    ${!hideProfit ? `<div class="osb-item"><span>Tổng lãi ròng</span><b class="${sumProfit >= 0 ? 'income-color' : 'expense-color'}">${sumProfit >= 0 ? '+' : ''}${money(sumProfit)} ₫</b></div>` : ''}
+  </div>`;
+
   const headers = '<th>Khách & Kiện hàng</th><th>Giá trị hàng, Cước & Đóng gói</th><th>Phải thu & Công nợ</th><th>Lợi nhuận thực tế</th><th>Trạng thái, Ghi chú & Thao tác</th>';
-  const hasFilter = Boolean(query || window.statusFilter);
+  const hasFilter = Boolean(query || window.statusFilter || window.platformFilter || window.ordersPeriodOnly);
   const tableHtml = `<table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>` +
     (rows ? '' : `<div class="empty">
       <div class="empty-ico">${hasFilter ? '🔎' : '🧮'}</div>
@@ -2815,11 +2927,13 @@ function getOrdersViewData() {
       </div>
     </div>`);
 
-  return { totalCount: all.length, filteredCount: filtered.length, tableHtml };
+  return { totalCount: all.length, filteredCount: filtered.length, tableHtml, summaryHtml };
 }
 
 function ordersPage() {
   const all = db.orderNotes || [];
+  const activeBp = getSelectedBusinessPeriod();
+  const periodCount = all.filter(x => matchesDateFilter(x.date, { startDate: activeBp.startDate, endDate: activeBp.endDate })).length;
   const xtCount = all.filter(x => x.lineType === 'Xách tay').length;
   const tthCount = all.filter(x => x.lineType === 'Thanh toán hộ').length;
   const kgCount = all.filter(x => x.lineType === 'Ký gửi kho').length;
@@ -2830,11 +2944,12 @@ function ordersPage() {
     return m.customerDebt > 0 || m.warehouseDebt > 0;
   }).length;
   const data = getOrdersViewData();
-  const hasFilter = Boolean(query || window.statusFilter || window.platformFilter);
+  const hasFilter = Boolean(query || window.statusFilter || window.platformFilter || window.ordersPeriodOnly);
 
   return `<div class="section-stack">
     <div class="stage-strip" aria-label="Lọc nhanh theo Line, Đóng gói và Công nợ">
-      <button type="button" class="chip ${window.statusFilter === '' ? 'active' : ''}" onclick="setFilter('')">Tất cả đơn <span class="chip-count">${all.length}</span></button>
+      <button type="button" class="chip ${window.statusFilter === '' && !window.ordersPeriodOnly ? 'active' : ''}" onclick="window.ordersPeriodOnly=false;setFilter('')">Tất cả đơn <span class="chip-count">${all.length}</span></button>
+      <button type="button" class="chip ${window.ordersPeriodOnly ? 'active' : ''}" onclick="window.ordersPeriodOnly=!window.ordersPeriodOnly;render()">📅 Riêng ${esc(activeBp.shortLabel)} <span class="chip-count">${periodCount}</span></button>
       <button type="button" class="chip ${window.statusFilter === '__line_Xách tay' ? 'active' : ''}" onclick="setFilter('__line_Xách tay')">✈️ Xách tay <span class="chip-count">${xtCount}</span></button>
       <button type="button" class="chip ${window.statusFilter === '__line_Thanh toán hộ' ? 'active' : ''}" onclick="setFilter('__line_Thanh toán hộ')">💴 Thanh toán hộ <span class="chip-count">${tthCount}</span></button>
       <button type="button" class="chip ${window.statusFilter === '__line_Ký gửi kho' ? 'active' : ''}" onclick="setFilter('__line_Ký gửi kho')">📦 Ký gửi kho <span class="chip-count">${kgCount}</span></button>
@@ -2842,13 +2957,18 @@ function ordersPage() {
       <button type="button" class="chip ${window.statusFilter === '__debt' ? 'active' : ''}" onclick="setFilter('__debt')">⚠️ Còn công nợ <span class="chip-count">${debtCount}</span></button>
     </div>
 
+    ${data.summaryHtml}
+
     <section class="panel">
       <div class="panel-head">
         <div>
           <div class="panel-title">Danh sách Note đơn · Dịch vụ Đóng gói & Minh bạch lãi lỗ</div>
           <div class="panel-sub">Thanh màu dưới số lãi thể hiện tỷ lệ: <b style="color:#20a8d8">Lãi cước</b> · <b style="color:#4dbd74">Phí dịch vụ</b> · <b style="color:#f86c6b">Lãi đóng gói</b> · <b style="color:#d97706">Lãi tỷ giá tệ</b></div>
         </div>
-        <span class="result-count" id="resultCount">${data.filteredCount} / ${data.totalCount} đơn</span>
+        <div class="row-actions">
+          <button type="button" class="btn small" onclick="exportOrdersCsv()" title="Xuất bảng Excel (.csv) chuẩn tiếng Việt">📊 Xuất Excel</button>
+          <span class="result-count" id="resultCount">${data.filteredCount} / ${data.totalCount} đơn</span>
+        </div>
       </div>
       <div class="filters">
         <div class="search">
@@ -4126,7 +4246,7 @@ function renderTableInner(headersHtml, rows, kind) {
 }
 
 function tableShell(title, sub, placeholder, statuses, tableHtml, totalCount, filteredCount) {
-  const hasFilter = Boolean(query || window.statusFilter);
+  const hasFilter = Boolean(query || window.statusFilter || window.platformFilter);
   return `<section class="panel">
     <div class="panel-head">
       <div>
@@ -4141,6 +4261,10 @@ function tableShell(title, sub, placeholder, statuses, tableHtml, totalCount, fi
         <input id="searchInput" class="field" placeholder="${placeholder}" value="${esc(query)}" oninput="handleSearch(this)">
         <button type="button" id="searchClearBtn" class="search-clear ${query ? '' : 'hidden'}" onclick="clearSearchInput()" title="Xóa từ khóa">×</button>
       </div>
+      <select class="select" aria-label="Lọc theo App / Sàn mua hàng" onchange="setPlatformFilter(this.value)">
+        <option value="">Mọi App / Sàn</option>
+        ${shopPlatforms.map(p => `<option value="${esc(p)}" ${window.platformFilter === p ? 'selected' : ''}>🛍 ${esc(p)}</option>`).join('')}
+      </select>
       <select class="select" aria-label="Lọc theo trạng thái" onchange="setFilter(this.value)">
         <option value="">Mọi trạng thái</option>
         <option value="__active" ${window.statusFilter === '__active' ? 'selected' : ''}>Đang xử lý</option>
@@ -4155,7 +4279,9 @@ function tableShell(title, sub, placeholder, statuses, tableHtml, totalCount, fi
 function getShipmentsViewData() {
   const q = query.toLowerCase();
   const filtered = (db.shipments || []).filter(o => {
-    const matchQ = `${o.customer} ${o.code} ${o.waybill} ${o.product} ${o.packagingType || ''} ${o.phone} ${o.note || ''}`.toLowerCase().includes(q);
+    const normPlat = normalizePlatformName(o.platform);
+    const matchQ = `${o.customer} ${o.code} ${o.waybill} ${o.product} ${normPlat} ${o.packagingType || ''} ${o.phone} ${o.note || ''}`.toLowerCase().includes(q);
+    if (window.platformFilter && normPlat !== window.platformFilter) return false;
     const matchStatus = !window.statusFilter ? true : window.statusFilter === '__active' ? o.status !== 'Đã giao khách' : o.status === window.statusFilter;
     return matchQ && matchStatus;
   });
@@ -4178,7 +4304,10 @@ function getShipmentsViewData() {
       </div>
     </td>
     <td data-label="Mã vận đơn">
-      <a class="link" target="_blank" rel="noopener" href="https://www.17track.net/en#nums=${encodeURIComponent(o.waybill)}" title="Tra cứu trên 17Track">${esc(o.waybill)} ↗</a>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <a class="link" target="_blank" rel="noopener" href="https://www.17track.net/en#nums=${encodeURIComponent(o.waybill)}" title="Tra cứu trên 17Track">${esc(o.waybill)} ↗</a>
+        <button type="button" class="iconbtn" style="padding:2px 6px;font-size:11px" onclick="copyTextSafe('${jsArg(o.waybill)}','📋 Đã chép mã vận đơn ${jsArg(o.waybill)}')" title="Sao chép mã vận đơn">📋</button>
+      </div>
     </td>
     <td data-label="Sản phẩm">
       <div class="person">${esc(o.product)} ${hasPack ? `<span class="pack-pill">🪵 ${esc(o.packagingType || 'Đóng gói')}${parseNum(o.packCharge) > 0 ? ` (+${money(o.packCharge)} ₫)` : ''}</span>` : ''}</div>
@@ -4209,16 +4338,36 @@ function getShipmentsViewData() {
 }
 
 function shipmentsPage() {
-  const counts = stageCounts(db.shipments, shipStages);
-  const activeCount = (db.shipments || []).filter(o => o.status !== 'Đã giao khách').length;
+  const ships = db.shipments || [];
+  const counts = stageCounts(ships, shipStages);
+  const activeCount = ships.filter(o => o.status !== 'Đã giao khách').length;
+  const inTransitCount = ships.filter(o => ['Đang vận chuyển nội địa TQ', 'Đã đến kho Trung Quốc', 'Đã nhập kho Trung Quốc', 'Đang về Việt Nam'].includes(o.status)).length;
+  const atVnCount = ships.filter(o => o.status === 'Đã về kho Việt Nam').length;
   const data = getShipmentsViewData();
   return `<div class="section-stack">
+    <div class="cashflow-grid">
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('')">
+        <span class="cash-label">📦 Tổng vận đơn ký gửi</span>
+        <strong class="cash-val">${ships.length} vận đơn</strong>
+        <span class="cash-sub">Đang xử lý: ${activeCount} · Đã giao khách: ${ships.length - activeCount}</span>
+      </div>
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('__active')">
+        <span class="cash-label">🚚 Đang trên đường TQ → VN</span>
+        <strong class="cash-val blue-color">${inTransitCount} kiện</strong>
+        <span class="cash-sub">Bấm tra cứu 17Track trực tiếp trên từng mã vận đơn</span>
+      </div>
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('Đã về kho Việt Nam')">
+        <span class="cash-label">🏠 Đã về kho VN (Chờ giao / Tính lãi)</span>
+        <strong class="cash-val ${atVnCount > 0 ? 'amber-color' : 'income-color'}">${atVnCount} kiện</strong>
+        <span class="cash-sub">Bấm "＋ Tính lãi" trên dòng để tạo Note đơn 1 chạm</span>
+      </div>
+    </div>
     <div class="stage-strip" aria-label="Lọc nhanh trạng thái vận đơn">
-      <button type="button" class="chip ${window.statusFilter === '' ? 'active' : ''}" onclick="setFilter('')">Tất cả <span class="chip-count">${(db.shipments || []).length}</span></button>
+      <button type="button" class="chip ${window.statusFilter === '' ? 'active' : ''}" onclick="setFilter('')">Tất cả <span class="chip-count">${ships.length}</span></button>
       <button type="button" class="chip ${window.statusFilter === '__active' ? 'active' : ''}" onclick="setFilter('__active')">Cần theo dõi <span class="chip-count">${activeCount}</span></button>
       ${counts.filter(c => c.value > 0).map(c => `<button type="button" class="chip ${window.statusFilter === c.label ? 'active' : ''}" onclick="setFilter('${esc(c.label)}')">${esc(c.label)} <span class="chip-count">${c.value}</span></button>`).join('')}
     </div>
-    ${tableShell('Danh sách đơn ký gửi', 'Bấm trực tiếp vào nhãn trạng thái để đổi nhanh; mọi ghi chú tự gắn giờ ngày tháng năm.', 'Tìm tên khách, mã DR, SĐT, mã vận đơn, sản phẩm…', shipStages, data.tableHtml, data.totalCount, data.filteredCount)}
+    ${tableShell('Danh sách đơn ký gửi', 'Bấm trực tiếp vào nhãn trạng thái để đổi nhanh; bấm 📋 để chép nhanh mã vận đơn.', 'Tìm tên khách, mã DR, SĐT, mã vận đơn, sản phẩm…', shipStages, data.tableHtml, data.totalCount, data.filteredCount)}
   </div>`;
 }
 
@@ -4234,7 +4383,9 @@ function safeUrl(u) {
 function getPurchasesViewData() {
   const q = query.toLowerCase();
   const filtered = (db.purchases || []).filter(o => {
-    const matchQ = `${o.customer} ${o.code} ${o.product} ${o.phone} ${o.variant || ''} ${o.note || ''}`.toLowerCase().includes(q);
+    const normPlat = normalizePlatformName(o.platform);
+    const matchQ = `${o.customer} ${o.code} ${o.product} ${normPlat} ${o.phone} ${o.variant || ''} ${o.note || ''}`.toLowerCase().includes(q);
+    if (window.platformFilter && normPlat !== window.platformFilter) return false;
     const matchStatus = !window.statusFilter ? true : window.statusFilter === '__active' ? !['Đặt hàng thành công', 'Đã hủy'].includes(o.status) : o.status === window.statusFilter;
     return matchQ && matchStatus;
   });
@@ -4242,21 +4393,27 @@ function getPurchasesViewData() {
   const rows = filtered.map(o => {
     const linkedOrder = (db.orderNotes || []).find(x => x.sourcePurchaseId === o.id);
     const linkedShip = (db.shipments || []).find(x => x.sourcePurchaseId === o.id);
+    const imgSafe = o.image && safeUrl(o.image) !== '#' ? safeUrl(o.image) : '';
     return `<tr>
     <td data-label="Khách hàng">
       <div class="customer">
         <div class="mini-avatar">${avatar(o.customer)}</div>
         <div>
           <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || 'Chưa có mã')}</span> ${platformPill(o.platform)}</div>
-          <div class="subline">${esc(o.platform)} · ${esc(o.phone || 'Chưa có SĐT')}</div>
+          <div class="subline">${esc(o.phone || 'Chưa có SĐT')}</div>
         </div>
       </div>
     </td>
     <td data-label="Sản phẩm">
-      <div class="person">${esc(o.product)}</div>
-      <div class="subline">${esc(o.variant || 'Chưa chọn phân loại')}</div>
-      ${o.note ? `<div class="note-box">${esc(o.note)}</div>` : ''}
-      ${o.updatedAt ? `<span class="ts-stamp">🕒 ${esc(o.updatedAt)}</span>` : ''}
+      <div style="display:flex;align-items:center;gap:10px">
+        ${imgSafe ? `<img src="${imgSafe}" alt="" class="prod-thumb" loading="lazy" onerror="this.style.display='none'">` : ''}
+        <div>
+          <div class="person">${esc(o.product)}</div>
+          <div class="subline">${esc(o.variant || 'Chưa chọn phân loại')}</div>
+          ${o.note ? `<div class="note-box">${esc(o.note)}</div>` : ''}
+          ${o.updatedAt ? `<span class="ts-stamp">🕒 ${esc(o.updatedAt)}</span>` : ''}
+        </div>
+      </div>
     </td>
     <td data-label="Số lượng"><b>${esc(o.qty)}</b></td>
     <td data-label="Giá / Báo khách">
@@ -4288,12 +4445,32 @@ function getPurchasesViewData() {
 }
 
 function purchasesPage() {
-  const counts = stageCounts(db.purchases, buyStages);
-  const activeCount = (db.purchases || []).filter(o => !['Đặt hàng thành công', 'Đã hủy'].includes(o.status)).length;
+  const buys = db.purchases || [];
+  const counts = stageCounts(buys, buyStages);
+  const activeCount = buys.filter(o => !['Đặt hàng thành công', 'Đã hủy'].includes(o.status)).length;
+  const totalCny = buys.filter(o => o.status !== 'Đã hủy').reduce((s, o) => s + parseNum(o.quote || o.value) * Math.max(1, parseNum(o.qty) || 1), 0);
+  const doneCount = buys.filter(o => o.status === 'Đặt hàng thành công').length;
   const data = getPurchasesViewData();
   return `<div class="section-stack">
+    <div class="cashflow-grid">
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('')">
+        <span class="cash-label">🛍 Tổng yêu cầu mua hộ</span>
+        <strong class="cash-val">${buys.length} yêu cầu</strong>
+        <span class="cash-sub">Đặt thành công: ${doneCount} · Đang xử lý: ${activeCount}</span>
+      </div>
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('__active')">
+        <span class="cash-label">⏳ Chờ báo giá / Thanh toán / Đặt hàng</span>
+        <strong class="cash-val ${activeCount > 0 ? 'amber-color' : 'income-color'}">${activeCount} yêu cầu</strong>
+        <span class="cash-sub">Bấm lọc nhanh các đơn cần xử lý ngay</span>
+      </div>
+      <div class="cash-card">
+        <span class="cash-label">💴 Tổng giá trị hàng sàn ước tính</span>
+        <strong class="cash-val blue-color">¥${numFmt(totalCny)}</strong>
+        <span class="cash-sub">Bấm "＋ Tính lãi" trên dòng để chuyển sang Note đơn VND</span>
+      </div>
+    </div>
     <div class="stage-strip" aria-label="Lọc nhanh trạng thái mua hộ">
-      <button type="button" class="chip ${window.statusFilter === '' ? 'active' : ''}" onclick="setFilter('')">Tất cả <span class="chip-count">${(db.purchases || []).length}</span></button>
+      <button type="button" class="chip ${window.statusFilter === '' ? 'active' : ''}" onclick="setFilter('')">Tất cả <span class="chip-count">${buys.length}</span></button>
       <button type="button" class="chip ${window.statusFilter === '__active' ? 'active' : ''}" onclick="setFilter('__active')">Cần xử lý <span class="chip-count">${activeCount}</span></button>
       ${counts.filter(c => c.value > 0).map(c => `<button type="button" class="chip ${window.statusFilter === c.label ? 'active' : ''}" onclick="setFilter('${esc(c.label)}')">${esc(c.label)} <span class="chip-count">${c.value}</span></button>`).join('')}
     </div>
@@ -4303,10 +4480,7 @@ function purchasesPage() {
 
 function getCustomersViewData() {
   const q = query.toLowerCase();
-  const allCustomers = uniqueCustomers();
-  const customers = allCustomers.filter(o => `${o.customer} ${o.code} ${o.phone} ${o.address}`.toLowerCase().includes(q));
-
-  const rows = customers.map(o => {
+  const allCustomers = uniqueCustomers().map(o => {
     const custOrders = (db.orderNotes || []).filter(x => sameCustomer(x, o));
     const oc = custOrders.length;
     const sc = (db.shipments || []).filter(x => sameCustomer(x, o)).length;
@@ -4316,6 +4490,18 @@ function getCustomersViewData() {
     const unlinkedExtraDebt = unlinkedCustExtras.reduce((sum, x) => sum + Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x)), 0);
     const debt = activeCustOrders.reduce((sum, x) => sum + calcOrderMetrics(x).customerDebt, 0) + unlinkedExtraDebt;
     const totalProfit = activeCustOrders.reduce((sum, x) => sum + calcOrderMetrics(x).netProfit, 0);
+    return { ...o, oc, sc, pc, totalCountAll: oc + sc + pc, debt, totalProfit };
+  });
+
+  const customers = allCustomers.filter(o => {
+    const matchQ = `${o.customer} ${o.code} ${o.phone} ${o.address}`.toLowerCase().includes(q);
+    if (!matchQ) return false;
+    if (window.statusFilter === '__cust_debt') return o.debt > 0;
+    if (window.statusFilter === '__cust_vip') return o.totalCountAll >= 2;
+    return true;
+  }).sort((a, b) => (b.debt - a.debt) || (b.totalCountAll - a.totalCountAll));
+
+  const rows = customers.map(o => {
     const custKey = jsArg(o.code || o.phone || o.customer);
 
     return `<tr>
@@ -4323,20 +4509,21 @@ function getCustomersViewData() {
         <div class="customer">
           <div class="mini-avatar">${avatar(o.customer)}</div>
           <div>
-            <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || '—')}</span></div>
+            <div class="person">${esc(o.customer)} <span class="code">${esc(o.code || '—')}</span> ${o.totalCountAll >= 2 ? '<span class="shop-pill shop-95">💎 Thân thiết</span>' : ''}</div>
             <div>
-              ${debt > 0 ? `<span class="debt-pill owe">Đang nợ ${money(debt)} ₫</span>` : '<span class="debt-pill ok">✓ Không nợ</span>'}
-              ${oc > 0 ? `<span class="subline" style="margin-left:6px">Lãi tích lũy: <b class="${totalProfit >= 0 ? 'income-color' : 'expense-color'}">${totalProfit >= 0 ? '+' : ''}${money(totalProfit)} ₫</b></span>` : ''}
+              ${o.debt > 0 ? `<span class="debt-pill owe">Đang nợ ${money(o.debt)} ₫</span>` : '<span class="debt-pill ok">✓ Không nợ</span>'}
+              ${o.oc > 0 && currentUserRole !== 'warehouse' ? `<span class="subline" style="margin-left:6px">Lãi tích lũy: <b class="${o.totalProfit >= 0 ? 'income-color' : 'expense-color'}">${o.totalProfit >= 0 ? '+' : ''}${money(o.totalProfit)} ₫</b></span>` : ''}
             </div>
           </div>
         </div>
       </td>
-      <td data-label="Số điện thoại">${esc(o.phone || 'Chưa cập nhật')}</td>
+      <td data-label="Số điện thoại">${o.phone ? `<span style="cursor:pointer" onclick="copyTextSafe('${jsArg(o.phone)}','📋 Đã chép SĐT ${jsArg(o.phone)}')" title="Bấm sao chép SĐT">${esc(o.phone)} 📋</span>` : 'Chưa cập nhật'}</td>
       <td data-label="Địa chỉ nhận">${esc(o.address || 'Chưa nhập địa chỉ')}</td>
-      <td data-label="Tổng đơn"><b>${oc}</b> note đơn · <b>${sc}</b> vận đơn · <b>${pc}</b> mua hộ</td>
+      <td data-label="Tổng đơn"><b>${o.oc}</b> note đơn · <b>${o.sc}</b> vận đơn · <b>${o.pc}</b> mua hộ</td>
       <td data-label="Thao tác nhanh">
         <div class="row-actions">
-          ${oc > 0 ? `<button type="button" class="iconbtn" onclick="viewCustomerOrders('${jsArg(o.customer)}')">Xem đơn</button>` : ''}
+          ${o.debt > 0 ? `<button type="button" class="iconbtn danger-tint" onclick="copyCustomerDebtZalo('${custKey}')" title="Sao chép bảng đối chiếu công nợ gửi Zalo cho khách">📋 Nhắc nợ Zalo</button>` : ''}
+          ${o.oc > 0 ? `<button type="button" class="iconbtn" onclick="viewCustomerOrders('${jsArg(o.customer)}')">Xem đơn</button>` : ''}
           <button type="button" class="iconbtn primary-tint" onclick="openForCustomer('order','${custKey}')">＋ Note đơn</button>
           <button type="button" class="iconbtn" onclick="openForCustomer('shipment','${custKey}')">＋ Vận đơn</button>
           <button type="button" class="iconbtn" onclick="openForCustomer('purchase','${custKey}')">＋ Mua hộ</button>
@@ -4346,6 +4533,7 @@ function getCustomersViewData() {
   }).join('');
 
   return {
+    allCustomers,
     totalCount: allCustomers.length,
     filteredCount: customers.length,
     tableHtml: renderTableInner('<th>Khách hàng & Công nợ</th><th>Số điện thoại</th><th>Địa chỉ nhận hàng</th><th>Số lượng đơn</th><th>Thao tác nhanh</th>', rows, 'customers')
@@ -4354,12 +4542,41 @@ function getCustomersViewData() {
 
 function customersPage() {
   const data = getCustomersViewData();
+  const debtCusts = data.allCustomers.filter(c => c.debt > 0);
+  const totalCustDebt = debtCusts.reduce((s, c) => s + c.debt, 0);
+  const vipCusts = data.allCustomers.filter(c => c.totalCountAll >= 2);
+  const hasFilter = Boolean(query || window.statusFilter);
+
   return `<div class="section-stack">
+    <div class="cashflow-grid">
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('')">
+        <span class="cash-label">👥 Tổng danh bạ khách hàng</span>
+        <strong class="cash-val">${data.totalCount} khách hàng</strong>
+        <span class="cash-sub">Tự động gom từ Note đơn, Vận đơn ký gửi &amp; Mua hộ</span>
+      </div>
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('__cust_debt')">
+        <span class="cash-label">⚠️ Khách đang còn nợ chưa thu</span>
+        <strong class="cash-val ${totalCustDebt > 0 ? 'expense-color' : 'income-color'}">${debtCusts.length} khách · ${money(totalCustDebt)} ₫</strong>
+        <span class="cash-sub">Bấm lọc khách nợ &amp; chép phiếu nhắc nợ Zalo 1 chạm</span>
+      </div>
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('__cust_vip')">
+        <span class="cash-label">💎 Khách hàng thân thiết (≥ 2 đơn)</span>
+        <strong class="cash-val income-color">${vipCusts.length} khách hàng</strong>
+        <span class="cash-sub">Tự điền sẵn SĐT, mã DR &amp; địa chỉ khi tạo đơn mới</span>
+      </div>
+    </div>
+
+    <div class="stage-strip" aria-label="Lọc nhanh danh bạ khách hàng">
+      <button type="button" class="chip ${window.statusFilter === '' ? 'active' : ''}" onclick="setFilter('')">Tất cả khách <span class="chip-count">${data.totalCount}</span></button>
+      <button type="button" class="chip ${window.statusFilter === '__cust_debt' ? 'active' : ''}" onclick="setFilter('__cust_debt')">⚠️ Đang còn nợ <span class="chip-count">${debtCusts.length}</span></button>
+      <button type="button" class="chip ${window.statusFilter === '__cust_vip' ? 'active' : ''}" onclick="setFilter('__cust_vip')">💎 Khách thân thiết (≥ 2 đơn) <span class="chip-count">${vipCusts.length}</span></button>
+    </div>
+
     <section class="panel">
       <div class="panel-head">
         <div>
-          <div class="panel-title">Danh bạ khách hàng & Công nợ</div>
-          <div class="panel-sub">Tổng hợp tự động từ Note đơn, Đơn ký gửi và Mua hộ.</div>
+          <div class="panel-title">Danh bạ khách hàng &amp; Đối chiếu Công nợ nhanh</div>
+          <div class="panel-sub">Khách đang nợ được ưu tiên xếp lên đầu; bấm "📋 Nhắc nợ Zalo" để chép chi tiết từng đơn chưa thanh toán.</div>
         </div>
         <span class="result-count" id="resultCount">${data.filteredCount} / ${data.totalCount} khách</span>
       </div>
@@ -4369,6 +4586,7 @@ function customersPage() {
           <input id="searchInput" class="field" placeholder="Tìm tên khách, mã DR, số điện thoại hoặc địa chỉ…" value="${esc(query)}" oninput="handleSearch(this)">
           <button type="button" id="searchClearBtn" class="search-clear ${query ? '' : 'hidden'}" onclick="clearSearchInput()" title="Xóa từ khóa">×</button>
         </div>
+        <button type="button" id="resetFilterBtn" class="btn subtle small ${hasFilter ? '' : 'hidden'}" onclick="clearFilters()">Đặt lại lọc</button>
       </div>
       <div class="table-wrap" id="tableArea">${data.tableHtml}</div>
     </section>
