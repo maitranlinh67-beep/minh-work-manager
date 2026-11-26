@@ -6635,7 +6635,35 @@ function buildAppContextForDeepSeek() {
     ? topDebts.map(d => `- ${d.customer}: còn nợ ${money(d.totalDebt)}đ (${d.orders} đơn)`).join('\n')
     : '- Không có khách hàng nào đang nợ.';
 
-  return `DỮ LIỆU THẬT TỪ ỨNG DỤNG DAIRYCOW LOGISTICS (Thời điểm: ${nowStamp(true)}, Múi giờ: ${APP_TIMEZONE})
+  const viewNames = {
+    overview: 'Dashboard Tổng quan',
+    orders: 'Note đơn · Dịch vụ Đóng gói & Tính lãi',
+    incidentals: `Chi phí phát sinh & Đóng gói (Tab đang mở: ${incTab === 'extraship' ? '1. Cước ship phát sinh' : incTab === 'wood' ? '2. Đóng hộp gỗ' : incTab === 'carton' ? '3. Đóng hộp carton' : '4. Chống sốc'})`,
+    finance: `Thu chi & Báo cáo (Tab đang mở: ${financeTab === 'cashflow' ? 'Thu chi & Dòng tiền' : financeTab === 'periods' ? 'Kỳ chốt 26' : financeTab === 'debts' ? 'Công nợ Khách & Kho' : financeTab === 'report' ? 'Báo cáo AI' : 'Lịch sử chỉnh sửa'})`,
+    shipments: 'Đơn ký gửi kho (WMS)',
+    purchases: 'Yêu cầu mua hộ (OMS)',
+    customers: 'Danh bạ khách hàng & Công nợ'
+  };
+  const visibleTextRaw = String(document.getElementById('content')?.innerText || '').replace(/\s+/g, ' ').trim();
+  const visibleScreenExcerpt = visibleTextRaw.slice(0, 1200);
+  const syncCfg = loadSyncConfig();
+  const incSum = calcIncidentalsSummary();
+
+  return `MÀN HÌNH NGƯỜI DÙNG ĐANG MỞ TRƯỚC MẮT:
+- Trang hiện tại: ${viewNames[view] || view}
+- Vai trò đang chọn: ${currentUserRole}
+- Bộ lọc đang bật: Từ khóa="${query || 'không'}" | Trạng thái="${window.statusFilter || 'tất cả'}" | App/Sàn="${window.platformFilter || 'tất cả'}" | Chế độ kỳ="${periodMode}"
+- Trạng thái đồng bộ 2 máy (Bạn & Minh): ${cleanFirebaseUrl(syncCfg.url) ? `Đã bật Firebase (Kho: ${cleanRoomId(syncCfg.room)}, đồng bộ lúc ${syncCfg.lastSyncAt || 'vừa xong'})` : 'Chưa gắn link Firebase (đang lưu cục bộ trên máy này)'}
+- Nội dung đang hiển thị trên màn hình: ${visibleScreenExcerpt || '(trống)'}
+
+SƠ ĐỒ CHỨC NĂNG APP DAIRYCOW LOGISTICS (để tư vấn & hướng dẫn người dùng bấm đúng nút):
+1. Dashboard: 4 thẻ KPI (Lợi nhuận kỳ, Tổng thu kỳ, Tổng công nợ thực tế xuyên kỳ, Lưu lượng đơn kỳ), biểu đồ Traffic, thanh chọn Kỳ chốt ngày 26 (26/tháng này -> 25/tháng sau, tự chốt 00:00 ngày 26 giờ VN).
+2. Note đơn · Tính lãi: 4 loại Line (Xách tay, Thanh toán hộ, Ký gửi kho, Mua hộ trọn gói), chọn 9 App/Sàn (POIZON, TMALL, 1688, 95分, TAOBAO, JINGDONG, PIN DUO DUO, XIAN YU, VIP SHOP), tự tính lãi cước, lãi đóng gói, phí DV %, lãi tỷ giá tệ, công nợ khách & nút Đã trả cước kho.
+3. Chi phí phát sinh (4 tab): 1. Cước ship phát sinh (cộng vào phải thu khách, không tính lợi nhuận mặc định), 2. Đóng hộp gỗ, 3. Đóng hộp carton, 4. Chống sốc (có công cụ chia giá vốn theo số lần dùng/cuộn). Hiện tổng lãi đóng gói: ${money(incSum.totalPackProfit)}đ (Gỗ ${money(incSum.woodProfit)}đ, Carton ${money(incSum.cartonProfit)}đ, Chống sốc ${money(incSum.shockProfit)}đ); Cước ship PS: tổng ${money(incSum.totalExtraShip)}đ (chưa thu ${money(incSum.uncollectedExtraShip)}đ).
+4. Thu chi & Báo cáo: Tab Thu chi, Kỳ chốt 26 (tra cứu lịch sử các kỳ đã chốt & đối chiếu công nợ), Công nợ Khách & Kho, Báo cáo AI, Lịch sử sửa (Audit Log).
+5. Đồng bộ & Sao lưu: Nút "☁ Đồng bộ & Sao lưu" trên thanh công cụ có đồng bộ Firebase 2 chiều + 10 mốc dự phòng tự động chống xóa nhầm + xuất/nhập JSON.
+
+DỮ LIỆU THẬT TỪ ỨNG DỤNG DAIRYCOW LOGISTICS (Thời điểm: ${nowStamp(true)}, Múi giờ: ${APP_TIMEZONE})
 Kỳ đang xem: ${label}${selectedPeriodObj ? ` (${selectedPeriodObj.status === 'closed' ? 'ĐÃ CHỐT' : 'ĐANG HOẠT ĐỘNG'})` : ''}
 TỔNG HỢP KỲ ĐANG XEM:
 - Lưu lượng đơn: ${s.totalTrafficOrders || 0} đơn (${s.orderCount || 0} Note đơn, ${s.shipmentCount || 0} Ký gửi, ${s.purchaseCount || 0} Mua hộ)
