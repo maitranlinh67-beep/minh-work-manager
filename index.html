@@ -34,6 +34,7 @@
         <nav class="topnav-links" aria-label="Điều hướng nhanh">
           <button type="button" class="topnav-link" data-topnav="overview" onclick="setView('overview', document.querySelector('[data-view=overview]'))">Dashboard</button>
           <button type="button" class="topnav-link" data-topnav="orders" onclick="setView('orders', document.querySelector('[data-view=orders]'))">Note đơn</button>
+          <button type="button" class="topnav-link" data-topnav="debts" onclick="setView('debts', document.querySelector('[data-view=debts]'))">Sổ ghi nợ</button>
           <button type="button" class="topnav-link" data-topnav="incidentals" onclick="setView('incidentals', document.querySelector('[data-view=incidentals]'))">Chi phí phát sinh</button>
           <button type="button" class="topnav-link" data-topnav="shipments" onclick="setView('shipments', document.querySelector('[data-view=shipments]'))">Đơn ký gửi</button>
         </nav>
@@ -104,6 +105,11 @@
 
       <div class="side-section-title">TÀI CHÍNH & KHÁCH HÀNG</div>
       <div class="nav-group">
+        <button type="button" class="nav" data-view="debts" id="navDebtsBtn" onclick="setView('debts',this)">
+          <span class="ico nav-dot c-rose" aria-hidden="true">📒</span>
+          <span class="nav-label">Sổ Ghi Nợ</span>
+          <span class="nav-count warn hidden" id="sideDebtBookCount" title="Khoản đang nợ chưa thu">0</span>
+        </button>
         <button type="button" class="nav" data-view="finance" id="navFinanceBtn" onclick="setView('finance',this)">
           <span class="ico nav-dot c-amber" aria-hidden="true">📊</span>
           <span class="nav-label">Thu chi & Báo cáo</span>

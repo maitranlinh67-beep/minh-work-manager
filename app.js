@@ -19,9 +19,11 @@ const shopPlatforms = [
   'PIN DUO DUO',
   'XIAN YU',
   'VIP SHOP',
+  'WECHAT',
   'Khác'
 ];
-const goodsTypes = ['Thức ăn khô', 'Gia dụng', 'Mỹ phẩm', 'Quần áo', 'Giày dép', 'Đồ cơ khí', 'Điện tử / Phụ kiện', 'Khác'];
+const goodsTypes = ['Thức ăn khô', 'Gia dụng', 'Mỹ phẩm', 'Quần áo', 'Giày dép', 'Trang sức', 'Đồ cơ khí', 'Điện tử / Phụ kiện', 'Khác'];
+const debtNoteStatuses = ['Chưa thu', 'Thu một phần', 'Đã thu'];
 const packagingTypes = [
   'Tiêu chuẩn (Miễn phí)',
   'Đóng hộp gỗ',
@@ -335,6 +337,7 @@ function loadDB() {
         purchases: filterOutDeleted(d.purchases, delMap),
         transactions: filterOutDeleted(d.transactions, delMap),
         extraShipments: filterOutDeleted(d.extraShipments, delMap),
+        debtNotes: filterOutDeleted(d.debtNotes, delMap),
         packagingCatalog: resolvePackagingCatalog(d.packagingCatalog, delMap, catInit),
         logs: Array.isArray(d.logs) ? d.logs : [],
         paymentRecords: filterOutDeleted(d.paymentRecords, delMap),
@@ -347,7 +350,7 @@ function loadDB() {
     const old = localStorage.getItem('linh-logistics-orders-v1');
     if (old) {
       const arr = JSON.parse(old);
-      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], extraShipments: [], packagingCatalog: samplePackagingCatalog(), logs: [], paymentRecords: [], businessPeriods: [], deletedIds: {}, _catalogInitialized: true, _userModified: true };
+      return { orderNotes: [], shipments: arr, purchases: [], transactions: [], extraShipments: [], debtNotes: [], packagingCatalog: samplePackagingCatalog(), logs: [], paymentRecords: [], businessPeriods: [], deletedIds: {}, _catalogInitialized: true, _userModified: true };
     }
   } catch (err) {
     console.error('Lỗi đọc dữ liệu localStorage:', err);
@@ -368,6 +371,7 @@ function loadDB() {
       { id: 't2', type: 'Chi', amount: 700000, category: 'Cước vận chuyển', party: 'Nhà vận chuyển', related: 'DR0001 · Áo khoác', method: 'Tiền mặt', date: '2026-11-05', note: '', updatedAt: '18:05 - 05/11/2026', history: [] }
     ],
     extraShipments: [],
+    debtNotes: [],
     packagingCatalog: samplePackagingCatalog(),
     logs: [
       { id: 'l1', time: nowStamp(true), action: 'Khởi động', target: 'Hệ thống', detail: 'Sẵn sàng lưu trữ và tính toán tự động' }
@@ -383,6 +387,7 @@ function loadDB() {
 function persist(options = {}) {
   try {
     if (!db.deletedIds || typeof db.deletedIds !== 'object') db.deletedIds = {};
+    if (!Array.isArray(db.debtNotes)) db.debtNotes = [];
     if (!Array.isArray(db.paymentRecords)) db.paymentRecords = [];
     if (!Array.isArray(db.businessPeriods)) db.businessPeriods = [];
     db._catalogInitialized = true;
@@ -566,6 +571,7 @@ function normalizePlatformName(raw = '') {
   if (up === 'PIN DUO DUO' || up === 'PINDUODUO' || up === 'PDD') return 'PIN DUO DUO';
   if (up === 'XIAN YU' || up === 'XIANYU') return 'XIAN YU';
   if (up === 'VIP SHOP' || up === 'VIPSHOP') return 'VIP SHOP';
+  if (up === 'WECHAT' || up === 'WEIXIN' || s === '微信') return 'WECHAT';
   if (up === 'KHÁC') return 'Khác';
   return s;
 }
@@ -582,7 +588,8 @@ function platformPill(platform) {
     'JINGDONG': 'shop-jd',
     'PIN DUO DUO': 'shop-pdd',
     'XIAN YU': 'shop-xianyu',
-    'VIP SHOP': 'shop-vip'
+    'VIP SHOP': 'shop-vip',
+    'WECHAT': 'shop-wechat'
   };
   const cls = clsMap[p] || 'shop-other';
   return `<span class="shop-pill ${cls}" title="Mua từ app ${esc(p)}">${esc(p)}</span>`;
@@ -775,6 +782,7 @@ function getValidPaymentRecords() {
     if (del[p.id]) return false;
     if (p.kind === 'order' && p.orderId && del[p.orderId]) return false;
     if (p.kind === 'extraship' && p.extraShipId && del[p.extraShipId]) return false;
+    if (p.kind === 'debtnote' && p.debtNoteId && del[p.debtNoteId]) return false;
     return true;
   });
 }
@@ -783,13 +791,39 @@ function purgePaymentsForDeletedRecord(kind, targetId) {
   if (!targetId || !Array.isArray(db.paymentRecords)) return;
   db.paymentRecords = db.paymentRecords.filter(p => {
     const match = (kind === 'order' && p.orderId === targetId) ||
-      (kind === 'extraship' && p.extraShipId === targetId);
+      (kind === 'extraship' && p.extraShipId === targetId) ||
+      (kind === 'debtnote' && p.debtNoteId === targetId);
     if (match) {
       markDeletedId(p.id);
       return false;
     }
     return true;
   });
+}
+
+function getDebtNoteRecordedPaid(debtNoteId, maxDate = '') {
+  if (!debtNoteId) return 0;
+  return getValidPaymentRecords()
+    .filter(p => p.kind === 'debtnote' && p.debtNoteId === debtNoteId && (!maxDate || (normalizeDateStr(p.date) || '') <= maxDate))
+    .reduce((sum, p) => sum + Math.max(0, Math.round(parseNum(p.amount))), 0);
+}
+
+function getDebtNoteCurrentPaid(d) {
+  const amt = Math.round(parseNum(d?.amount));
+  if (!d || amt <= 0) return 0;
+  if (d.status === 'Đã thu') return amt;
+  if (d.status === 'Thu một phần') return Math.min(amt, Math.max(0, Math.round(parseNum(d.paidAmount))));
+  return 0;
+}
+
+function getDebtNoteLegacyPaid(d) {
+  const currentPaid = getDebtNoteCurrentPaid(d);
+  const recordedAll = getDebtNoteRecordedPaid(d?.id);
+  return Math.max(0, currentPaid - recordedAll);
+}
+
+function getDebtNoteRemaining(d) {
+  return Math.max(0, Math.round(parseNum(d?.amount)) - getDebtNoteCurrentPaid(d));
 }
 
 function getOrderRecordedPaid(orderId, maxDate = '') {
@@ -859,7 +893,7 @@ function calcOrderDebtAsOf(o, asOfDate = '') {
   return Math.max(0, totalCollectAsOf - paidAsOf);
 }
 
-function recordPaymentEvent({ kind, orderId = '', extraShipId = '', orderCode = '', customer = '', amount = 0, date = '', originDate = '', note = '' }) {
+function recordPaymentEvent({ kind, orderId = '', extraShipId = '', debtNoteId = '', orderCode = '', customer = '', amount = 0, date = '', originDate = '', note = '' }) {
   const amt = Math.round(parseNum(amount));
   if (amt <= 0) return null;
   if (!Array.isArray(db.paymentRecords)) db.paymentRecords = [];
@@ -872,6 +906,7 @@ function recordPaymentEvent({ kind, orderId = '', extraShipId = '', orderCode = 
     kind: kind || 'order',
     orderId,
     extraShipId,
+    debtNoteId,
     orderCode: String(orderCode || ''),
     customer: String(customer || ''),
     amount: amt,
@@ -894,7 +929,8 @@ function reducePaymentEvents(kind, targetId, reduceAmt) {
   for (let i = 0; i < db.paymentRecords.length && rem > 0; i++) {
     const p = db.paymentRecords[i];
     const match = (kind === 'order' && p.kind === 'order' && p.orderId === targetId) ||
-      (kind === 'extraship' && p.kind === 'extraship' && p.extraShipId === targetId);
+      (kind === 'extraship' && p.kind === 'extraship' && p.extraShipId === targetId) ||
+      (kind === 'debtnote' && p.kind === 'debtnote' && p.debtNoteId === targetId);
     if (!match) continue;
     const cur = Math.round(parseNum(p.amount));
     if (cur <= rem) {
@@ -973,6 +1009,24 @@ function computeBusinessPeriodSnapshot(periodInfo) {
       });
     }
   });
+  (db.debtNotes || []).forEach(d => {
+    const dDate = normalizeDateStr(d.date);
+    if (dDate && dDate > periodInfo.endDate) return;
+    const unpaid = Math.max(0, Math.round(parseNum(d.amount)) - (getDebtNoteLegacyPaid(d) + getDebtNoteRecordedPaid(d.id, periodInfo.endDate)));
+    if (unpaid > 0) {
+      endingDebtItems.push({
+        orderId: '',
+        debtNoteId: d.id,
+        orderCode: d.orderCode || d.code || '',
+        customer: d.customer || '',
+        phone: d.phone || '',
+        product: `Ghi nợ riêng: ${d.reason || ''}`,
+        orderDate: dDate,
+        originPeriodId: getBusinessPeriodForDate(dDate || periodInfo.startDate).id,
+        debtAtClose: unpaid
+      });
+    }
+  });
   return {
     orderCount: st.orderCount,
     shipmentCount: st.shipmentCount,
@@ -1025,6 +1079,7 @@ function reconcileBusinessPeriods(nowInput, opts = {}) {
   (db.purchases || []).forEach(p => collectDate(p.date));
   (db.transactions || []).forEach(t => collectDate(t.date));
   (db.extraShipments || []).forEach(x => collectDate(x.date));
+  (db.debtNotes || []).forEach(d => collectDate(d.date));
   (db.paymentRecords || []).forEach(p => collectDate(p.date));
   discoveredIds.add(curP.id);
 
@@ -1206,6 +1261,7 @@ function calcPeriodFinancials(filterSpec = '') {
   const shipmentsInPeriod = (db.shipments || []).filter(s => matchDate(s.date));
   const purchasesInPeriod = (db.purchases || []).filter(p => matchDate(p.date));
   const extraShipsInPeriod = (db.extraShipments || []).filter(x => matchDate(x.date));
+  const debtNotesInPeriod = (db.debtNotes || []).filter(d => matchDate(d.date));
   const txs = (db.transactions || []).filter(x => matchDate(x.date));
   const paymentsInPeriod = getValidPaymentRecords().filter(p => matchDate(p.date));
 
@@ -1248,7 +1304,7 @@ function calcPeriodFinancials(filterSpec = '') {
     orderActualOut += calcOrderMetrics(o).shipCost;
   });
 
-  // Cước ship phát sinh (legacy paid + công nợ phát sinh của cước ship không gắn đơn)
+  // Cước ship phát sinh & Sổ ghi nợ riêng (legacy paid + công nợ phát sinh trong kỳ)
   let legacyExtraCollected = 0;
   extraShipsInPeriod.forEach(x => {
     legacyExtraCollected += getExtraLegacyPaid(x);
@@ -1256,6 +1312,14 @@ function calcPeriodFinancials(filterSpec = '') {
       const paidAsOf = getExtraLegacyPaid(x) + getExtraRecordedPaid(x.id, asOfDate);
       periodNewCustomerDebt += Math.max(0, Math.round(parseNum(x.amount)) - paidAsOf);
     }
+  });
+  let legacyDebtNoteCollected = 0;
+  debtNotesInPeriod.forEach(d => {
+    legacyDebtNoteCollected += getDebtNoteLegacyPaid(d);
+    const paidAsOf = asOfDate
+      ? (getDebtNoteLegacyPaid(d) + getDebtNoteRecordedPaid(d.id, asOfDate))
+      : getDebtNoteCurrentPaid(d);
+    periodNewCustomerDebt += Math.max(0, Math.round(parseNum(d.amount)) - paidAsOf);
   });
 
   (db.packagingCatalog || []).filter(item => matchDate(item.date)).forEach(item => {
@@ -1310,9 +1374,17 @@ function calcPeriodFinancials(filterSpec = '') {
       : getExtraCurrentPaid(x);
     allCustomerDebt += Math.max(0, Math.round(parseNum(x.amount)) - paidAsOf);
   });
+  (db.debtNotes || []).forEach(d => {
+    const dDate = normalizeDateStr(d.date);
+    if (asOfDate && dDate && dDate > asOfDate) return;
+    const paidAsOf = asOfDate
+      ? (getDebtNoteLegacyPaid(d) + getDebtNoteRecordedPaid(d.id, asOfDate))
+      : getDebtNoteCurrentPaid(d);
+    allCustomerDebt += Math.max(0, Math.round(parseNum(d.amount)) - paidAsOf);
+  });
 
-  const periodDirectCollected = legacyOrderCollected + legacyExtraCollected + Math.max(0, recordedPaymentIn - debtRecoveryIn);
-  const totalCollectedFromCustomer = legacyOrderCollected + legacyExtraCollected + recordedPaymentIn + txIn;
+  const periodDirectCollected = legacyOrderCollected + legacyExtraCollected + legacyDebtNoteCollected + Math.max(0, recordedPaymentIn - debtRecoveryIn);
+  const totalCollectedFromCustomer = legacyOrderCollected + legacyExtraCollected + legacyDebtNoteCollected + recordedPaymentIn + txIn;
   const totalBilledCustomer = orderBilledCustomer + txIn;
   const totalTransferredOut = orderActualOut + txOut;
   const totalServiceRevenue = orderServiceFeeTotal + txServiceIn;
@@ -1424,7 +1496,7 @@ function renderCoreUiWidgets(chartStats, allStats, chartPeriodLabel, allPendingC
       </svg>
     </div>
 
-    <div class="coreui-widget w-amber" onclick="openFinanceSubtab('debts')">
+    <div class="coreui-widget w-amber" onclick="setView('debts',document.querySelector('[data-view=debts]'))">
       <div class="widget-top">
         <div>
           <div class="widget-val">${money(debtMainVal)} ₫</div>
@@ -1491,6 +1563,11 @@ function renderTrafficChartCard(s, periodLabel, filterSpec = null) {
   (db.extraShipments || []).filter(x => matchDate(x.date)).forEach(x => {
     const lp = getExtraLegacyPaid(x);
     if (lp > 0) ensure(getKey(x.date)).moneyIn += lp;
+  });
+
+  (db.debtNotes || []).filter(d => matchDate(d.date)).forEach(d => {
+    const lp = getDebtNoteLegacyPaid(d);
+    if (lp > 0) ensure(getKey(d.date)).moneyIn += lp;
   });
 
   // Cộng tiền khách thanh toán (kể cả công nợ kỳ cũ) vào đúng ngày thực thu — KHÔNG cộng trùng lợi nhuận
@@ -1797,6 +1874,11 @@ function renderCashflowBarChart(filterSpec = '') {
     if (lp > 0) ensure(getKey(x.date)).moneyIn += lp;
   });
 
+  (db.debtNotes || []).filter(d => matchDate(d.date)).forEach(d => {
+    const lp = getDebtNoteLegacyPaid(d);
+    if (lp > 0) ensure(getKey(d.date)).moneyIn += lp;
+  });
+
   getValidPaymentRecords().filter(p => matchDate(p.date)).forEach(p => {
     const amt = Math.max(0, Math.round(parseNum(p.amount)));
     if (amt > 0) ensure(getKey(p.date)).moneyIn += amt;
@@ -1970,6 +2052,7 @@ function quickStatus(kind, id, newStatus) {
     kind === 'order' ? db.orderNotes :
     kind === 'shipment' ? db.shipments :
     kind === 'extraship' ? db.extraShipments :
+    kind === 'debtnote' ? db.debtNotes :
     db.purchases;
   const item = (list || []).find(x => x.id === id);
   if (!item) return;
@@ -1977,6 +2060,7 @@ function quickStatus(kind, id, newStatus) {
   if (oldStatus === newStatus) return;
   const stamp = nowStamp();
   const prevExtraPaid = kind === 'extraship' ? getExtraCurrentPaid(item) : 0;
+  const prevDebtPaid = kind === 'debtnote' ? getDebtNoteCurrentPaid(item) : 0;
   item.status = newStatus;
   if (kind === 'extraship') {
     if (newStatus === 'Đã thu') item.paidAmount = Math.round(parseNum(item.amount));
@@ -1997,6 +2081,25 @@ function quickStatus(kind, id, newStatus) {
     } else if (nextExtraPaid < prevExtraPaid) {
       reducePaymentEvents('extraship', item.id, prevExtraPaid - nextExtraPaid);
     }
+  } else if (kind === 'debtnote') {
+    if (newStatus === 'Đã thu') item.paidAmount = Math.round(parseNum(item.amount));
+    if (newStatus === 'Chưa thu') item.paidAmount = 0;
+    const nextDebtPaid = getDebtNoteCurrentPaid(item);
+    if (nextDebtPaid > prevDebtPaid) {
+      recordPaymentEvent({
+        kind: 'debtnote',
+        debtNoteId: item.id,
+        orderId: item.orderId || '',
+        orderCode: item.orderCode || item.code || '',
+        customer: item.customer || '',
+        amount: nextDebtPaid - prevDebtPaid,
+        date: dateKey(),
+        originDate: item.date,
+        note: `Thu sổ ghi nợ riêng (${item.reason || ''})`
+      });
+    } else if (nextDebtPaid < prevDebtPaid) {
+      reducePaymentEvents('debtnote', item.id, prevDebtPaid - nextDebtPaid);
+    }
   }
   // Đổi trạng thái giữ nguyên item.date ban đầu -> không biến đơn kỳ cũ thành đơn mới của kỳ hiện tại
   item.updatedAt = stamp;
@@ -2007,7 +2110,7 @@ function quickStatus(kind, id, newStatus) {
     action: 'Đổi trạng thái',
     detail: `${oldStatus} → ${newStatus}`
   });
-  const kindTitle = kind === 'order' ? 'Note đơn' : kind === 'shipment' ? 'Vận đơn' : kind === 'extraship' ? 'Cước ship phát sinh' : 'Mua hộ';
+  const kindTitle = kind === 'order' ? 'Note đơn' : kind === 'shipment' ? 'Vận đơn' : kind === 'extraship' ? 'Cước ship phát sinh' : kind === 'debtnote' ? 'Ghi nợ riêng' : 'Mua hộ';
   addAuditLog('Đổi trạng thái', `${kindTitle} · ${item.customer || item.orderCode || ''}`, `${oldStatus} → ${newStatus}`);
   persist();
   render();
@@ -2112,9 +2215,151 @@ function sameCustomer(rec, cust) {
   return Boolean(rn && cn && rn === cn);
 }
 
+function settleDebtNote(id) {
+  const item = (db.debtNotes || []).find(x => x.id === id);
+  if (!item) return;
+  const amt = Math.round(parseNum(item.amount));
+  const prevPaid = getDebtNoteCurrentPaid(item);
+  const delta = Math.max(0, amt - prevPaid);
+  item.status = 'Đã thu';
+  item.paidAmount = amt;
+  item.updatedAt = nowStamp();
+  item.updatedAtMs = Date.now();
+  if (!Array.isArray(item.history)) item.history = [];
+  item.history.unshift({ time: nowStamp(true), action: 'Thu đủ khoản nợ riêng', detail: `Thực thu +${money(delta)} ₫ (${item.reason || ''})` });
+  if (delta > 0) {
+    recordPaymentEvent({
+      kind: 'debtnote',
+      debtNoteId: item.id,
+      orderId: item.orderId || '',
+      orderCode: item.orderCode || item.code || '',
+      customer: item.customer || '',
+      amount: delta,
+      date: dateKey(),
+      originDate: item.date,
+      note: `Thu đủ khoản ghi nợ riêng: ${item.reason || ''}`
+    });
+  }
+  addAuditLog('Thu sổ ghi nợ riêng', item.customer || 'Khách hàng', `Thực thu +${money(delta)} ₫ (${item.reason || ''})`);
+  persist();
+  render();
+  toast(`✓ Đã thu đủ khoản ghi nợ riêng: +${money(delta)} ₫`);
+}
+
+function deleteDebtNote(id) {
+  const item = (db.debtNotes || []).find(x => x.id === id);
+  if (!item) return;
+  if (!confirm(`Xóa khoản Ghi nợ riêng "${item.reason || ''}" (${money(item.amount)} ₫) của khách ${item.customer || ''}?`)) return;
+  saveAutoSnapshot(`Trước khi xóa ghi nợ riêng ${item.customer || ''}`, true);
+  recordClosedPeriodAdjustment(item.date, 'Xóa ghi nợ riêng kỳ đã chốt', item.customer || 'Ghi nợ riêng', `Đã xóa ${item.reason || ''} (${money(item.amount)} ₫)`);
+  markDeletedId(id);
+  purgePaymentsForDeletedRecord('debtnote', id);
+  db.debtNotes = (db.debtNotes || []).filter(x => x.id !== id);
+  addAuditLog('Xóa ghi nợ riêng', item.customer || 'Ghi nợ riêng', `Đã xóa ${item.reason || ''} (${money(item.amount)} ₫)`);
+  persist();
+  render();
+  toast('Đã xóa khoản ghi nợ riêng (đã tạo mốc dự phòng)');
+}
+
+function promptPartialDebtPay(kind, id) {
+  let rem = 0;
+  let label = '';
+  let target = null;
+  if (kind === 'order') {
+    target = (db.orderNotes || []).find(x => x.id === id);
+    if (!target) return;
+    rem = calcOrderMetrics(target).customerDebt;
+    label = `${target.customer} · ${target.product || target.goodsType}`;
+  } else if (kind === 'debtnote') {
+    target = (db.debtNotes || []).find(x => x.id === id);
+    if (!target) return;
+    rem = getDebtNoteRemaining(target);
+    label = `${target.customer} · ${target.reason}`;
+  } else if (kind === 'extraship') {
+    target = (db.extraShipments || []).find(x => x.id === id);
+    if (!target) return;
+    rem = Math.max(0, Math.round(parseNum(target.amount)) - getExtraCurrentPaid(target));
+    label = `${target.customer} · ${target.content}`;
+  }
+  if (rem <= 0) {
+    toast('Khoản này đã được thu đủ rồi.');
+    return;
+  }
+  const raw = prompt(`Nhập số tiền khách vừa thanh toán thêm cho "${label}"\n(Đang còn nợ: ${money(rem)} ₫):`, String(rem));
+  if (raw === null) return;
+  const payAmt = Math.round(parseNum(raw));
+  if (payAmt <= 0) {
+    alert('Vui lòng nhập số tiền lớn hơn 0.');
+    return;
+  }
+  if (payAmt >= rem) {
+    if (kind === 'order') settleOrderDebt(id, 'customer');
+    else if (kind === 'debtnote') settleDebtNote(id);
+    else if (kind === 'extraship') settleExtraShip(id);
+    return;
+  }
+  const stamp = nowStamp();
+  const payDate = dateKey();
+  if (!Array.isArray(target.history)) target.history = [];
+  if (kind === 'order') {
+    target.customerPaid = Math.round(parseNum(target.customerPaid)) + payAmt;
+    recordPaymentEvent({
+      kind: 'order', orderId: target.id, orderCode: target.code || '', customer: target.customer || '',
+      amount: payAmt, date: payDate, originDate: target.date,
+      note: `Thu 1 phần công nợ đơn ${target.product || target.goodsType || ''}`
+    });
+  } else if (kind === 'debtnote') {
+    target.paidAmount = getDebtNoteCurrentPaid(target) + payAmt;
+    target.status = 'Thu một phần';
+    recordPaymentEvent({
+      kind: 'debtnote', debtNoteId: target.id, orderId: target.orderId || '', orderCode: target.orderCode || target.code || '',
+      customer: target.customer || '', amount: payAmt, date: payDate, originDate: target.date,
+      note: `Thu 1 phần ghi nợ riêng: ${target.reason || ''}`
+    });
+  } else if (kind === 'extraship') {
+    target.paidAmount = getExtraCurrentPaid(target) + payAmt;
+    target.status = 'Thu một phần';
+    recordPaymentEvent({
+      kind: 'extraship', extraShipId: target.id, orderId: target.orderId || '', orderCode: target.orderCode || '',
+      customer: target.customer || '', amount: payAmt, date: payDate, originDate: target.date,
+      note: `Thu 1 phần cước ship PS: ${target.content || ''}`
+    });
+  }
+  target.updatedAt = stamp;
+  target.updatedAtMs = Date.now();
+  target.history.unshift({ time: nowStamp(true), action: 'Thu bớt công nợ', detail: `Thực thu +${money(payAmt)} ₫ · Còn nợ ${money(rem - payAmt)} ₫` });
+  addAuditLog('Thu bớt công nợ', label, `Thực thu +${money(payAmt)} ₫ · Còn lại ${money(rem - payAmt)} ₫`);
+  persist();
+  render();
+  toast(`✓ Đã ghi nhận thu +${money(payAmt)} ₫ (Còn nợ ${money(rem - payAmt)} ₫)`);
+}
+
+function settleAllCustomerDebts(custKey) {
+  const c = uniqueCustomers().find(o => (o.code || o.phone || o.customer).toLowerCase() === String(custKey || '').toLowerCase());
+  if (!c) return;
+  const unpaidOrders = (db.orderNotes || []).filter(x => x.status !== 'Đã hủy' && sameCustomer(x, c) && calcOrderMetrics(x).customerDebt > 0);
+  const unpaidNotes = (db.debtNotes || []).filter(d => sameCustomer(d, c) && getDebtNoteRemaining(d) > 0);
+  const unpaidExtras = (db.extraShipments || []).filter(x => !isExtraShipLinkedToOrder(x) && sameCustomer(x, c) && (Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x)) > 0);
+  const total =
+    unpaidOrders.reduce((s, o) => s + calcOrderMetrics(o).customerDebt, 0) +
+    unpaidNotes.reduce((s, d) => s + getDebtNoteRemaining(d), 0) +
+    unpaidExtras.reduce((s, x) => s + Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x)), 0);
+  if (total <= 0) {
+    toast('Khách hàng này không còn khoản nợ nào.');
+    return;
+  }
+  if (!confirm(`Xác nhận đã thu đủ TẤT CẢ công nợ của khách "${c.customer}"?\nTổng thực thu: +${money(total)} ₫ (${unpaidOrders.length} đơn + ${unpaidNotes.length} ghi nợ riêng + ${unpaidExtras.length} ship PS)`)) {
+    return;
+  }
+  unpaidOrders.forEach(o => settleOrderDebt(o.id, 'customer'));
+  unpaidNotes.forEach(d => settleDebtNote(d.id));
+  unpaidExtras.forEach(x => settleExtraShip(x.id));
+  toast(`✓ Đã tất toán toàn bộ +${money(total)} ₫ của khách ${c.customer}!`);
+}
+
 function uniqueCustomers() {
   const list = [];
-  [...(db.orderNotes || []), ...(db.shipments || []), ...(db.purchases || [])].forEach(o => {
+  [...(db.orderNotes || []), ...(db.shipments || []), ...(db.purchases || []), ...(db.debtNotes || [])].forEach(o => {
     if (!String(o.customer || o.phone || o.code || '').trim()) return;
     const found = list.find(c => sameCustomer(o, c));
     if (!found) {
@@ -2248,6 +2493,12 @@ function updateTableResults() {
     const data = getHistoryViewData();
     area.innerHTML = data.tableHtml;
     if (countEl) countEl.textContent = `${data.filteredCount} / ${data.totalCount} hoạt động`;
+  } else if (view === 'debts') {
+    const data = getDebtsViewData();
+    area.innerHTML = data.tableHtml;
+    if (countEl) countEl.textContent = `${data.filteredCount} / ${data.totalCount} khoản`;
+    const sumEl = document.getElementById('debtsSummaryBar');
+    if (sumEl) sumEl.outerHTML = data.summaryHtml;
   } else if (view === 'customers') {
     const data = getCustomersViewData();
     area.innerHTML = data.tableHtml;
@@ -2282,7 +2533,27 @@ function getPendingItems() {
     .filter(o => o.status !== 'Đã giao khách')
     .map(o => ({ ...o, kind: 'shipment', kindLabel: 'Ký gửi', urgent: o.status === 'Đã về kho Việt Nam' || o.status === 'Chờ người bán gửi' }));
 
-  return [...pendingOrders, ...pendingBuy, ...pendingShip].sort((a, b) => (Number(b.urgent) - Number(a.urgent)) || (b.date || '').localeCompare(a.date || ''));
+  const pendingDebtNotes = (db.debtNotes || [])
+    .filter(d => getDebtNoteRemaining(d) > 0)
+    .map(d => ({
+      ...d,
+      kind: 'debtnote',
+      kindLabel: 'Ghi nợ riêng',
+      urgent: true,
+      remainingDebt: getDebtNoteRemaining(d)
+    }));
+
+  const pendingExtraShips = (db.extraShipments || [])
+    .filter(x => !isExtraShipLinkedToOrder(x) && Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x)) > 0)
+    .map(x => ({
+      ...x,
+      kind: 'extraship',
+      kindLabel: 'Cước ship PS',
+      urgent: true,
+      remainingDebt: Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x))
+    }));
+
+  return [...pendingOrders, ...pendingDebtNotes, ...pendingExtraShips, ...pendingBuy, ...pendingShip].sort((a, b) => (Number(b.urgent) - Number(a.urgent)) || (b.date || '').localeCompare(a.date || ''));
 }
 
 // ============================================================================
@@ -2379,11 +2650,16 @@ function render() {
   const pendingAll = getPendingItems();
   const pendingTotal = pendingAll.length;
 
+  const unpaidOrderDebtsCount = (db.orderNotes || []).filter(o => o.status !== 'Đã hủy' && calcOrderMetrics(o).customerDebt > 0).length;
+  const unpaidManualDebtsCount = (db.debtNotes || []).filter(d => getDebtNoteRemaining(d) > 0).length;
+  const unpaidUnlinkedExtraCount = (db.extraShipments || []).filter(x => !isExtraShipLinkedToOrder(x) && Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x)) > 0).length;
+  const openCustomerDebtsCount = unpaidOrderDebtsCount + unpaidManualDebtsCount + unpaidUnlinkedExtraCount;
+
   const debtRecordsCount = (db.orderNotes || []).filter(o => {
     if (o.status === 'Đã hủy') return false;
     const m = calcOrderMetrics(o);
     return m.customerDebt > 0 || m.warehouseDebt > 0;
-  }).length;
+  }).length + unpaidManualDebtsCount + unpaidUnlinkedExtraCount;
 
   document.getElementById('orderCount').textContent = (db.orderNotes || []).length;
   document.getElementById('shipCount').textContent = (db.shipments || []).length;
@@ -2417,6 +2693,12 @@ function render() {
     debtBadge.classList.toggle('hidden', debtRecordsCount === 0);
   }
 
+  const sideDebtBookEl = document.getElementById('sideDebtBookCount');
+  if (sideDebtBookEl) {
+    sideDebtBookEl.textContent = openCustomerDebtsCount;
+    sideDebtBookEl.classList.toggle('hidden', openCustomerDebtsCount === 0);
+  }
+
   const roleShortMap = { admin: 'Admin', warehouse: 'Kho WMS', sales: 'Sale OMS' };
   const roleAvatarMap = { admin: 'AD', warehouse: 'WH', sales: 'SL' };
   const roleSelectEl = document.getElementById('roleSelect');
@@ -2434,18 +2716,20 @@ function render() {
   if (sideFinanceBtn) sideFinanceBtn.classList.toggle('hidden', currentUserRole === 'warehouse');
 
   const titles = {
-    overview: ['DAIRYCOW LOGISTICS · Dashboard Vận Hành', 'Hệ thống quản lý vận đơn ký gửi (WMS), dịch vụ đóng gói, dòng tiền và lợi nhuận thời gian thực.'],
-    orders: ['Note đơn · Dịch vụ Đóng gói & Tính lãi', 'Quản lý đơn Xách tay / Thanh toán hộ / Ký gửi, gắn vật tư đóng gói, cước ship phát sinh và tự tính lãi.'],
+    overview: ['DAIRYCOW LOGISTICS · Dashboard Vận Hành', 'Hệ thống quản lý vận đơn ký gửi (WMS), dịch vụ đóng gói, sổ ghi nợ, dòng tiền và lợi nhuận thời gian thực.'],
+    orders: ['Note đơn · Dịch vụ Đóng gói & Tính lãi', 'Quản lý đơn Xách tay / Thanh toán hộ / Ký gửi, tự động ghi nợ khi khách chưa trả đủ và tính lãi chi tiết.'],
+    debts: ['Sổ Ghi Nợ · Tự Động Gom Nợ Đơn & Ghi Nợ Riêng', 'Tự động ghi nợ mọi đơn khách chưa thanh toán đủ + ghi khoản nợ lẻ riêng. Mọi khoản nợ vẫn hiển thị ở phần cuối như bình thường.'],
     incidentals: ['Quản lý Chi phí phát sinh & Lợi nhuận Đóng gói', 'Quản lý Cước ship phát sinh và 3 danh mục Đóng hộp gỗ, Đóng hộp carton, Chống sốc.'],
     finance: ['Thu chi, Công nợ & Báo cáo Lợi nhuận', 'Theo dõi minh bạch dòng tiền theo Ngày / Tháng / Năm, lãi dịch vụ đóng gói và lịch sử chỉnh sửa.'],
     shipments: ['Quản lý Đơn ký gửi kho (WMS)', 'Theo dõi mã vận đơn Trung Quốc - Việt Nam, quy cách đóng gói và tiến độ xuất nhập kho.'],
-    purchases: ['Quản lý Yêu cầu mua hộ (OMS)', 'Báo giá link sản phẩm Taobao/1688/Pinduoduo, xác nhận thanh toán và chuyển sang tính lãi 1 chạm.'],
+    purchases: ['Quản lý Yêu cầu mua hộ (OMS)', 'Báo giá link sản phẩm Taobao/1688/Pinduoduo/WeChat, xác nhận thanh toán và chuyển sang tính lãi 1 chạm.'],
     customers: ['Danh bạ khách hàng & Công nợ', 'Tổng hợp mã khách hàng DR, số lượng đơn, số điện thoại và công nợ theo từng khách.']
   };
 
   const bcCurrentMap = {
     overview: 'Dashboard',
     orders: 'Note đơn & Đóng gói',
+    debts: 'Sổ Ghi Nợ',
     incidentals: 'Chi phí phát sinh',
     finance: 'Thu chi & Báo cáo',
     shipments: 'Đơn ký gửi kho',
@@ -2461,14 +2745,20 @@ function render() {
   const actionsEl = document.getElementById('pageActions');
   if (view === 'overview') {
     actionsEl.innerHTML = `
-      <button type="button" class="btn" onclick="setView('incidentals',document.querySelector('[data-view=incidentals]'))">🪵 Chi phí phát sinh</button>
+      <button type="button" class="btn" onclick="openNew('debtnote')">📝 Ghi nợ riêng</button>
       <button type="button" class="btn" onclick="openNew('shipment')">＋ Đơn ký gửi</button>
       <button id="addBtn" type="button" class="btn primary" onclick="openNew('order')">＋ Tạo Note đơn mới</button>
     `;
   } else if (view === 'orders') {
     actionsEl.innerHTML = `
+      <button type="button" class="btn" onclick="openNew('debtnote')">📝 Ghi nợ riêng</button>
       <button type="button" class="btn" onclick="openNew('extraship')">＋ Cước ship phát sinh</button>
       <button id="addBtn" type="button" class="btn primary" onclick="openNew('order')">＋ Tạo Note đơn mới</button>
+    `;
+  } else if (view === 'debts') {
+    actionsEl.innerHTML = `
+      <button type="button" class="btn" onclick="openNew('order')">＋ Tạo Note đơn</button>
+      <button id="addBtn" type="button" class="btn primary" onclick="openNew('debtnote')">＋ Ghi khoản nợ riêng</button>
     `;
   } else if (view === 'incidentals') {
     if (incTab === 'extraship') {
@@ -2484,6 +2774,7 @@ function render() {
     `;
   } else if (view === 'customers') {
     actionsEl.innerHTML = `
+      <button type="button" class="btn" onclick="openNew('debtnote')">📝 Ghi nợ riêng</button>
       <button type="button" class="btn" onclick="openNew('shipment')">＋ Vận đơn ký gửi</button>
       <button id="addBtn" type="button" class="btn primary" onclick="openNew('order')">＋ Note đơn cho khách</button>
     `;
@@ -2496,6 +2787,7 @@ function render() {
   document.getElementById('content').innerHTML =
     view === 'overview' ? overviewPage() :
     view === 'orders' ? ordersPage() :
+    view === 'debts' ? debtsPage() :
     view === 'incidentals' ? incidentalsPage() :
     view === 'finance' ? financePage() :
     view === 'shipments' ? shipmentsPage() :
@@ -2563,14 +2855,15 @@ function overviewPage() {
 
   const allPending = getPendingItems();
   const hasAnyDebt = m => m.customerDebt > 0 || m.warehouseDebt > 0;
+  const isDebtPending = x => (x.kind === 'order' && hasAnyDebt(x.metrics)) || x.kind === 'debtnote' || x.kind === 'extraship';
   const filteredPending = allPending.filter(x =>
     todoFilter === 'all' ? true :
-    todoFilter === 'debt' ? (x.kind === 'order' && hasAnyDebt(x.metrics)) :
+    todoFilter === 'debt' ? isDebtPending(x) :
     todoFilter === 'order' ? x.kind === 'order' :
     todoFilter === 'buy' ? x.kind === 'purchase' :
     todoFilter === 'ship' ? x.kind === 'shipment' : true
   );
-  const debtOnlyCount = allPending.filter(x => x.kind === 'order' && hasAnyDebt(x.metrics)).length;
+  const debtOnlyCount = allPending.filter(isDebtPending).length;
   const recentLogs = (db.logs || []).slice(0, 6);
 
   const actionStrip = `<div class="dash-alert-strip">
@@ -2617,7 +2910,7 @@ function overviewPage() {
             <button type="button" class="chip ${todoFilter === 'ship' ? 'active' : ''}" onclick="todoFilter='ship';render()">Ký gửi</button>
           </div>
         </div>
-        ${filteredPending.length ? filteredPending.slice(0, 6).map(item => {
+        ${filteredPending.length ? filteredPending.slice(0, 10).map(item => {
           if (item.kind === 'order') {
             const m = item.metrics;
             return `<div class="todo-row">
@@ -2644,6 +2937,33 @@ function overviewPage() {
                 ${m.customerDebt > 0 ? `<button type="button" class="iconbtn primary-tint" onclick="settleOrderDebt('${item.id}','customer')">Thu đủ</button>` : ''}
                 ${m.warehouseDebt > 0 ? `<button type="button" class="iconbtn" onclick="settleOrderDebt('${item.id}','warehouse')">Trả kho</button>` : ''}
                 <button type="button" class="iconbtn" onclick="editRecord('order','${item.id}')">Sửa</button>
+              </div>
+            </div>`;
+          }
+          if (item.kind === 'debtnote' || item.kind === 'extraship') {
+            const isManual = item.kind === 'debtnote';
+            const rem = item.remainingDebt || 0;
+            return `<div class="todo-row">
+              <div class="todo-left">
+                <div class="todo-info">
+                  <div class="todo-title">
+                    <span>${esc(item.customer)}</span>
+                    <span class="debt-src-pill ${isManual ? 'debt-src-manual' : 'debt-src-extra'}">${isManual ? '📝 Ghi nợ riêng' : '🚚 Cước ship PS'}</span>
+                    <span class="code">${esc(isManual ? item.reason : item.content)}</span>
+                  </div>
+                  <div class="todo-meta">
+                    <span class="expense-color"><b>Khách nợ ${money(rem)} ₫</b></span>
+                    <span>· Tổng: ${money(item.amount)} ₫</span>
+                    <span>· Ngày: ${dateText(item.date)}</span>
+                    ${item.updatedAt ? `<span>· 🕒 ${esc(item.updatedAt)}</span>` : ''}
+                  </div>
+                </div>
+              </div>
+              <div class="todo-right">
+                ${statusSelect(item.kind, item.id, item.status, isManual ? debtNoteStatuses : extraShipStatuses)}
+                <button type="button" class="iconbtn primary-tint" onclick="${isManual ? `settleDebtNote('${item.id}')` : `settleExtraShip('${item.id}')`}">Thu đủ</button>
+                <button type="button" class="iconbtn" onclick="promptPartialDebtPay('${item.kind}','${item.id}')">Thu bớt</button>
+                <button type="button" class="iconbtn" onclick="editRecord('${item.kind}','${item.id}')">Sửa</button>
               </div>
             </div>`;
           }
@@ -2741,6 +3061,7 @@ function copyCustomerDebtZalo(custKey) {
   const c = uniqueCustomers().find(o => (o.code || o.phone || o.customer).toLowerCase() === String(custKey || '').toLowerCase());
   if (!c) return;
   const unpaidOrders = (db.orderNotes || []).filter(x => x.status !== 'Đã hủy' && sameCustomer(x, c) && calcOrderMetrics(x).customerDebt > 0);
+  const unpaidManualNotes = (db.debtNotes || []).filter(d => sameCustomer(d, c) && getDebtNoteRemaining(d) > 0);
   const unlinkedExtras = (db.extraShipments || []).filter(x => !isExtraShipLinkedToOrder(x) && sameCustomer(x, c) && (Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x)) > 0);
   let totalDebt = 0;
   const detailLines = [];
@@ -2748,6 +3069,11 @@ function copyCustomerDebtZalo(custKey) {
     const m = calcOrderMetrics(o);
     totalDebt += m.customerDebt;
     detailLines.push(`${idx + 1}. [${dateText(o.date)}] ${o.product || o.goodsType}${o.platform ? ` (${normalizePlatformName(o.platform)})` : ''}: còn ${money(m.customerDebt)} ₫`);
+  });
+  unpaidManualNotes.forEach(d => {
+    const rem = getDebtNoteRemaining(d);
+    totalDebt += rem;
+    detailLines.push(`${detailLines.length + 1}. [${dateText(d.date)}] ${d.reason || 'Khoản ghi nợ riêng'}: còn ${money(rem)} ₫`);
   });
   unlinkedExtras.forEach(x => {
     const rem = Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x));
@@ -2913,7 +3239,16 @@ function getOrdersViewData() {
 
   const headers = '<th>Khách & Kiện hàng</th><th>Giá trị hàng, Cước & Đóng gói</th><th>Phải thu & Công nợ</th><th>Lợi nhuận thực tế</th><th>Trạng thái, Ghi chú & Thao tác</th>';
   const hasFilter = Boolean(query || window.statusFilter || window.platformFilter || window.ordersPeriodOnly);
-  const tableHtml = `<table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>` +
+  const tfootHtml = rows ? `<tfoot>
+    <tr>
+      <td><b>Tổng phần cuối (${filtered.length} đơn · ${numFmt(sumPkgs)} kiện)</b></td>
+      <td>Đã trả: <b class="income-color">${money(sumPaid)} ₫</b></td>
+      <td>Phải thu: <b>${money(sumCollect)} ₫</b> · Còn nợ: <b class="${sumDebt > 0 ? 'expense-color' : 'income-color'}">${money(sumDebt)} ₫</b></td>
+      <td>${!hideProfit ? `<b class="${sumProfit >= 0 ? 'income-color' : 'expense-color'}">${sumProfit >= 0 ? '+' : ''}${money(sumProfit)} ₫</b>` : '—'}</td>
+      <td><button type="button" class="link-btn" onclick="setView('debts',document.querySelector('[data-view=debts]'))">Mở Sổ Ghi Nợ →</button></td>
+    </tr>
+  </tfoot>` : '';
+  const tableHtml = `<table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody>${tfootHtml}</table>` +
     (rows ? '' : `<div class="empty">
       <div class="empty-ico">${hasFilter ? '🔎' : '🧮'}</div>
       <strong>${hasFilter ? 'Không tìm thấy Note đơn phù hợp' : 'Chưa có Note đơn nào'}</strong>
@@ -3588,6 +3923,11 @@ function getDailyBreakdown(filterSpec) {
     if (lp > 0) ensure(normalizeDateStr(x.date) || dateKey()).collected += lp;
   });
 
+  (db.debtNotes || []).filter(d => matchDate(d.date)).forEach(d => {
+    const lp = getDebtNoteLegacyPaid(d);
+    if (lp > 0) ensure(normalizeDateStr(d.date) || dateKey()).collected += lp;
+  });
+
   getValidPaymentRecords().filter(p => matchDate(p.date)).forEach(p => {
     const d = normalizeDateStr(p.date) || dateKey();
     const amt = Math.max(0, Math.round(parseNum(p.amount)));
@@ -3688,7 +4028,8 @@ function renderBusinessPeriodsTab(topToolbar) {
   const debtReconcileRows = endingItems.map(item => {
     const postPayments = (db.paymentRecords || []).filter(pr => {
       const sameTarget = (item.orderId && pr.kind === 'order' && pr.orderId === item.orderId) ||
-        (item.extraShipId && pr.kind === 'extraship' && pr.extraShipId === item.extraShipId);
+        (item.extraShipId && pr.kind === 'extraship' && pr.extraShipId === item.extraShipId) ||
+        (item.debtNoteId && pr.kind === 'debtnote' && pr.debtNoteId === item.debtNoteId);
       return sameTarget && (normalizeDateStr(pr.date) || '') > detailObj.endDate;
     });
     const paidAfterClose = postPayments.reduce((a, pr) => a + Math.round(parseNum(pr.amount)), 0);
@@ -3699,6 +4040,9 @@ function renderBusinessPeriodsTab(topToolbar) {
     } else if (item.extraShipId) {
       const ex = (db.extraShipments || []).find(x => x.id === item.extraShipId);
       currentRemaining = ex ? Math.max(0, Math.round(parseNum(ex.amount)) - getExtraCurrentPaid(ex)) : 0;
+    } else if (item.debtNoteId) {
+      const dn = (db.debtNotes || []).find(d => d.id === item.debtNoteId);
+      currentRemaining = dn ? getDebtNoteRemaining(dn) : 0;
     }
     return { ...item, paidAfterClose, currentRemaining, postPayments };
   });
@@ -4010,7 +4354,21 @@ function financePage() {
         const origP = getBusinessPeriodForDate(o.date);
         const isOldPeriod = origP.id !== curBizP.id;
         cur.debt += m.customerDebt;
-        cur.orders.push({ id: o.id, label: o.product || o.goodsType, amount: m.customerDebt, date: o.date, isOldPeriod, periodShort: origP.shortLabel });
+        cur.orders.push({ id: o.id, kind: 'order', label: o.product || o.goodsType, amount: m.customerDebt, date: o.date, isOldPeriod, periodShort: origP.shortLabel });
+      }
+    });
+    (db.debtNotes || []).forEach(d => {
+      const rem = getDebtNoteRemaining(d);
+      if (rem > 0) {
+        let cur = custDebtList.find(c => sameCustomer(d, c));
+        if (!cur) {
+          cur = { customer: d.customer, phone: d.phone, code: d.code, debt: 0, orders: [] };
+          custDebtList.push(cur);
+        }
+        const origP = getBusinessPeriodForDate(d.date);
+        const isOldPeriod = origP.id !== curBizP.id;
+        cur.debt += rem;
+        cur.orders.push({ id: d.id, kind: 'debtnote', label: `Ghi nợ: ${d.reason || ''}`, amount: rem, date: d.date, isOldPeriod, periodShort: origP.shortLabel });
       }
     });
 
@@ -4049,6 +4407,7 @@ function financePage() {
               <div class="panel-title">📥 Công nợ Khách hàng (Bảo toàn xuyên kỳ)</div>
               <div class="panel-sub">Tổng tiền khách còn nợ thực tế: <b class="expense-color">${money(liveAllStats.allCustomerDebt)} ₫</b></div>
             </div>
+            <button type="button" class="btn small primary" onclick="setView('debts',document.querySelector('[data-view=debts]'))">📒 Mở Sổ Ghi Nợ riêng →</button>
           </div>
           ${custDebtList.length ? custDebtList.map(c => `<div class="todo-row">
             <div class="todo-left">
@@ -4061,9 +4420,9 @@ function financePage() {
             <div class="todo-right">
               <b class="expense-color">${money(c.debt)} ₫</b>
               ${c.orders.length === 1
-                ? `<button type="button" class="iconbtn primary-tint" onclick="settleOrderDebt('${c.orders[0].id}','customer')">Thu đủ</button>
-                   <button type="button" class="iconbtn" onclick="editRecord('order','${c.orders[0].id}')">Sửa</button>`
-                : `<button type="button" class="iconbtn" onclick="jumpToCustomerDebt('${jsArg(c.customer)}')">Xem ${c.orders.length} đơn</button>`}
+                ? `<button type="button" class="iconbtn primary-tint" onclick="${c.orders[0].kind === 'debtnote' ? `settleDebtNote('${c.orders[0].id}')` : `settleOrderDebt('${c.orders[0].id}','customer')`}">Thu đủ</button>
+                   <button type="button" class="iconbtn" onclick="editRecord('${c.orders[0].kind || 'order'}','${c.orders[0].id}')">Sửa</button>`
+                : `<button type="button" class="iconbtn" onclick="setView('debts',document.querySelector('[data-view=debts]'));query='${jsArg(c.customer)}';render()">Xem ${c.orders.length} khoản</button>`}
             </div>
           </div>`).join('') : '<div class="empty"><p>✓ Tuyệt vời! Không có khách hàng nào còn nợ.</p></div>'}
         </section>
@@ -4488,9 +4847,11 @@ function getCustomersViewData() {
     const activeCustOrders = custOrders.filter(x => x.status !== 'Đã hủy');
     const unlinkedCustExtras = (db.extraShipments || []).filter(x => !isExtraShipLinkedToOrder(x) && sameCustomer(x, o));
     const unlinkedExtraDebt = unlinkedCustExtras.reduce((sum, x) => sum + Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x)), 0);
-    const debt = activeCustOrders.reduce((sum, x) => sum + calcOrderMetrics(x).customerDebt, 0) + unlinkedExtraDebt;
+    const custDebtNotes = (db.debtNotes || []).filter(d => sameCustomer(d, o));
+    const manualNoteDebt = custDebtNotes.reduce((sum, d) => sum + getDebtNoteRemaining(d), 0);
+    const debt = activeCustOrders.reduce((sum, x) => sum + calcOrderMetrics(x).customerDebt, 0) + unlinkedExtraDebt + manualNoteDebt;
     const totalProfit = activeCustOrders.reduce((sum, x) => sum + calcOrderMetrics(x).netProfit, 0);
-    return { ...o, oc, sc, pc, totalCountAll: oc + sc + pc, debt, totalProfit };
+    return { ...o, oc, sc, pc, dnc: custDebtNotes.length, totalCountAll: oc + sc + pc + custDebtNotes.length, debt, totalProfit };
   });
 
   const customers = allCustomers.filter(o => {
@@ -4525,6 +4886,7 @@ function getCustomersViewData() {
           ${o.debt > 0 ? `<button type="button" class="iconbtn danger-tint" onclick="copyCustomerDebtZalo('${custKey}')" title="Sao chép bảng đối chiếu công nợ gửi Zalo cho khách">📋 Nhắc nợ Zalo</button>` : ''}
           ${o.oc > 0 ? `<button type="button" class="iconbtn" onclick="viewCustomerOrders('${jsArg(o.customer)}')">Xem đơn</button>` : ''}
           <button type="button" class="iconbtn primary-tint" onclick="openForCustomer('order','${custKey}')">＋ Note đơn</button>
+          <button type="button" class="iconbtn" onclick="openForCustomer('debtnote','${custKey}')">📝 Ghi nợ</button>
           <button type="button" class="iconbtn" onclick="openForCustomer('shipment','${custKey}')">＋ Vận đơn</button>
           <button type="button" class="iconbtn" onclick="openForCustomer('purchase','${custKey}')">＋ Mua hộ</button>
         </div>
@@ -4594,6 +4956,409 @@ function customersPage() {
 }
 
 // ============================================================================
+// TRANG MỚI: SỔ GHI NỢ RIÊNG (TỰ ĐỘNG GHI NỢ ĐƠN + GHI KHOẢN NỢ LẺ RIÊNG)
+// Sau khi ghi nợ vẫn hiển thị ở phần cuối Dashboard / Bảng đơn như bình thường
+// ============================================================================
+function buildUnifiedDebtEntries() {
+  const curBizP = getCurrentBusinessPeriod();
+  const entries = [];
+
+  // 1. Tự động gom mọi Note đơn khách chưa thanh toán đủ (customerDebt > 0)
+  (db.orderNotes || []).filter(o => o.status !== 'Đã hủy').forEach(o => {
+    const m = calcOrderMetrics(o);
+    if (m.customerDebt > 0) {
+      const origP = getBusinessPeriodForDate(o.date);
+      entries.push({
+        uid: `order_${o.id}`,
+        kind: 'order',
+        id: o.id,
+        sourceLabel: '🧮 Tự ghi từ Note đơn',
+        sourceClass: 'debt-src-order',
+        customer: o.customer || '',
+        phone: o.phone || '',
+        code: o.code || '',
+        platform: normalizePlatformName(o.platform || ''),
+        title: `${o.product || o.goodsType || 'Đơn hàng'} (${o.packages || 1} kiện · ${o.lineType || 'Note đơn'})`,
+        totalAmount: m.totalCollectCustomer,
+        paidAmount: m.customerPaid,
+        remainingDebt: m.customerDebt,
+        warehouseDebt: m.warehouseDebt,
+        status: o.status,
+        date: o.date || '',
+        note: o.note || '',
+        updatedAt: o.updatedAt || '',
+        isOldPeriod: origP.id !== curBizP.id,
+        periodShort: origP.shortLabel,
+        settled: false
+      });
+    }
+  });
+
+  // 2. Tự động gom các khoản Cước ship phát sinh độc lập chưa thu đủ
+  (db.extraShipments || []).filter(x => !isExtraShipLinkedToOrder(x)).forEach(x => {
+    const amt = Math.round(parseNum(x.amount));
+    const paid = getExtraCurrentPaid(x);
+    const rem = Math.max(0, amt - paid);
+    if (rem > 0) {
+      const origP = getBusinessPeriodForDate(x.date);
+      entries.push({
+        uid: `extra_${x.id}`,
+        kind: 'extraship',
+        id: x.id,
+        sourceLabel: '🚚 Tự ghi Cước ship PS',
+        sourceClass: 'debt-src-extra',
+        customer: x.customer || '',
+        phone: '',
+        code: x.orderCode || '',
+        platform: '',
+        title: x.content || 'Cước ship phát sinh',
+        totalAmount: amt,
+        paidAmount: paid,
+        remainingDebt: rem,
+        warehouseDebt: 0,
+        status: x.status || 'Chưa thu',
+        date: x.date || '',
+        note: '',
+        updatedAt: x.updatedAt || '',
+        isOldPeriod: origP.id !== curBizP.id,
+        periodShort: origP.shortLabel,
+        settled: false
+      });
+    }
+  });
+
+  // 3. Các khoản Ghi nợ riêng do người dùng tự nhập thêm (cả đang nợ & đã thu để tra cứu)
+  (db.debtNotes || []).forEach(d => {
+    const amt = Math.round(parseNum(d.amount));
+    const paid = getDebtNoteCurrentPaid(d);
+    const rem = Math.max(0, amt - paid);
+    const origP = getBusinessPeriodForDate(d.date);
+    entries.push({
+      uid: `manual_${d.id}`,
+      kind: 'debtnote',
+      id: d.id,
+      sourceLabel: '📝 Ghi nợ riêng',
+      sourceClass: 'debt-src-manual',
+      customer: d.customer || '',
+      phone: d.phone || '',
+      code: d.orderCode || d.code || '',
+      platform: '',
+      title: d.reason || 'Khoản ghi nợ riêng',
+      totalAmount: amt,
+      paidAmount: paid,
+      remainingDebt: rem,
+      warehouseDebt: 0,
+      status: rem <= 0 ? 'Đã thu' : (d.status || 'Chưa thu'),
+      date: d.date || '',
+      note: d.note || '',
+      updatedAt: d.updatedAt || '',
+      isOldPeriod: origP.id !== curBizP.id,
+      periodShort: origP.shortLabel,
+      settled: rem <= 0
+    });
+  });
+
+  return entries.sort((a, b) => (Number(a.settled) - Number(b.settled)) || (b.remainingDebt - a.remainingDebt) || (b.date || '').localeCompare(a.date || ''));
+}
+
+function exportDebtsCsv() {
+  const entries = buildUnifiedDebtEntries();
+  const rows = [
+    ['Ngày phát sinh', 'Nguồn ghi nợ', 'Mã KH / Đơn', 'Khách hàng', 'SĐT', 'Nội dung / Mặt hàng', 'Tổng phải thu (₫)', 'Khách đã trả (₫)', 'Còn nợ thực tế (₫)', 'Kỳ phát sinh', 'Trạng thái']
+  ];
+  entries.forEach(e => {
+    rows.push([
+      e.date || '', e.sourceLabel.replace(/^[^\wÀ-ỹ]+\s*/, ''), e.code || '', e.customer || '', e.phone || '',
+      e.title || '', e.totalAmount, e.paidAmount, e.remainingDebt, e.periodShort || '', e.status || ''
+    ]);
+  });
+  const csv = '\uFEFF' + rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `dairycow-so-ghi-no-${dateKey()}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 500);
+  toast('📊 Đã xuất file Excel (.csv) Sổ Ghi Nợ');
+}
+
+function getDebtsViewData() {
+  const q = query.toLowerCase();
+  const allEntries = buildUnifiedDebtEntries();
+  const openEntries = allEntries.filter(e => !e.settled);
+
+  const filtered = allEntries.filter(e => {
+    const matchQ = !q || `${e.customer} ${e.phone} ${e.code} ${e.title} ${e.platform} ${e.sourceLabel} ${e.note}`.toLowerCase().includes(q);
+    if (!matchQ) return false;
+    if (!window.statusFilter) return !e.settled; // Mặc định hiện tất cả khoản đang còn nợ
+    if (window.statusFilter === '__debt_auto') return !e.settled && (e.kind === 'order' || e.kind === 'extraship');
+    if (window.statusFilter === '__debt_manual') return e.kind === 'debtnote';
+    if (window.statusFilter === '__debt_paid') return e.settled;
+    if (window.statusFilter === '__debt_old') return !e.settled && e.isOldPeriod;
+    return true;
+  });
+
+  const rows = filtered.map(e => {
+    const custKey = jsArg(e.code || e.phone || e.customer);
+    return `<tr>
+      <td data-label="Khách hàng & Nguồn nợ">
+        <div class="customer">
+          <div class="mini-avatar">${avatar(e.customer)}</div>
+          <div>
+            <div class="person">
+              ${esc(e.customer)}
+              ${e.code ? `<span class="code">${esc(e.code)}</span>` : ''}
+              <span class="debt-src-pill ${e.sourceClass}">${e.sourceLabel}</span>
+              ${e.platform ? platformPill(e.platform) : ''}
+            </div>
+            <div class="subline">${e.phone ? `${esc(e.phone)} · ` : ''}Ngày: <b>${dateText(e.date)}</b> · ${e.isOldPeriod ? `<b class="amber-color">Nợ kỳ trước (${esc(e.periodShort)})</b>` : `<span class="income-color">Kỳ này (${esc(e.periodShort)})</span>`}</div>
+          </div>
+        </div>
+      </td>
+      <td data-label="Nội dung đơn / Khoản nợ">
+        <div class="person">${esc(e.title)}</div>
+        ${e.note ? `<div class="note-box">${esc(e.note)}</div>` : ''}
+        ${e.updatedAt ? `<span class="ts-stamp">🕒 ${esc(e.updatedAt)}</span>` : ''}
+      </td>
+      <td data-label="Tổng khoản / Đã trả">
+        <div>Tổng phải thu: <b>${money(e.totalAmount)} ₫</b></div>
+        <div class="subline">Đã trả: <b class="income-color">${money(e.paidAmount)} ₫</b></div>
+      </td>
+      <td data-label="Số tiền còn nợ">
+        ${e.remainingDebt > 0
+          ? `<div class="profit-num expense-color">${money(e.remainingDebt)} ₫</div><span class="debt-pill owe">Đang nợ</span>`
+          : `<div class="profit-num income-color">0 ₫</div><span class="debt-pill ok">✓ Đã thu đủ</span>`}
+      </td>
+      <td data-label="Trạng thái & Thu nợ">
+        <div style="display:flex;flex-direction:column;align-items:flex-start;gap:6px">
+          ${e.kind === 'debtnote'
+            ? statusSelect('debtnote', e.id, e.status, debtNoteStatuses)
+            : e.kind === 'extraship'
+              ? statusSelect('extraship', e.id, e.status, extraShipStatuses)
+              : `<span class="status ${statusClass(e.status)}">${esc(e.status)}</span>`}
+          <div class="row-actions">
+            ${e.remainingDebt > 0 ? `
+              <button type="button" class="iconbtn primary-tint" onclick="${e.kind === 'order' ? `settleOrderDebt('${e.id}','customer')` : e.kind === 'debtnote' ? `settleDebtNote('${e.id}')` : `settleExtraShip('${e.id}')`}">Thu đủ</button>
+              <button type="button" class="iconbtn" onclick="promptPartialDebtPay('${e.kind}','${e.id}')" title="Nhập số tiền khách trả bớt 1 phần">Thu bớt</button>
+            ` : ''}
+            ${e.kind === 'order'
+              ? `<button type="button" class="iconbtn" onclick="copyOrderBillZalo('${e.id}')">📋 Báo khách</button>
+                 <button type="button" class="iconbtn" onclick="editRecord('order','${e.id}')">Xem đơn</button>`
+              : `<button type="button" class="iconbtn" onclick="copyCustomerDebtZalo('${custKey}')">📋 Nhắc Zalo</button>
+                 <button type="button" class="iconbtn" onclick="editRecord('${e.kind}','${e.id}')">Sửa</button>
+                 <button type="button" class="iconbtn danger-tint" onclick="${e.kind === 'debtnote' ? `deleteDebtNote('${e.id}')` : `deleteExtraShip('${e.id}')`}">Xóa</button>`}
+          </div>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  const sumTotal = filtered.reduce((s, e) => s + e.totalAmount, 0);
+  const sumPaid = filtered.reduce((s, e) => s + e.paidAmount, 0);
+  const sumRem = filtered.reduce((s, e) => s + e.remainingDebt, 0);
+  const sumAuto = filtered.filter(e => e.kind !== 'debtnote').reduce((s, e) => s + e.remainingDebt, 0);
+  const sumManual = filtered.filter(e => e.kind === 'debtnote').reduce((s, e) => s + e.remainingDebt, 0);
+
+  const summaryHtml = `<div class="orders-summary-bar" id="debtsSummaryBar">
+    <div class="osb-item"><span>Khoản đang hiện</span><b>${filtered.length} khoản</b></div>
+    <div class="osb-item"><span>Nợ tự động từ Đơn</span><b class="blue-color">${money(sumAuto)} ₫</b></div>
+    <div class="osb-item"><span>Ghi nợ riêng</span><b class="amber-color">${money(sumManual)} ₫</b></div>
+    <div class="osb-item"><span>Đã trả trên danh sách</span><b class="income-color">${money(sumPaid)} ₫</b></div>
+    <div class="osb-item"><span>TỔNG CÒN PHẢI THU</span><b class="${sumRem > 0 ? 'expense-color' : 'income-color'}">${money(sumRem)} ₫</b></div>
+  </div>`;
+
+  const tfootHtml = rows ? `<tfoot>
+    <tr>
+      <td><b>Tổng cộng phần cuối (${filtered.length} khoản)</b></td>
+      <td>Tự ghi từ đơn: <b>${money(sumAuto)} ₫</b> · Ghi nợ riêng: <b>${money(sumManual)} ₫</b></td>
+      <td>Tổng: <b>${money(sumTotal)} ₫</b> · Đã thu: <b class="income-color">${money(sumPaid)} ₫</b></td>
+      <td><b class="${sumRem > 0 ? 'expense-color' : 'income-color'}">${money(sumRem)} ₫</b></td>
+      <td></td>
+    </tr>
+  </tfoot>` : '';
+
+  const hasFilter = Boolean(query || window.statusFilter);
+  const headers = '<th>Khách hàng & Nguồn nợ</th><th>Nội dung đơn / Khoản ghi nợ</th><th>Tổng khoản & Đã trả</th><th>Còn nợ thực tế</th><th>Trạng thái & Thu nợ nhanh</th>';
+  const tableHtml = `<table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody>${tfootHtml}</table>` +
+    (rows ? '' : `<div class="empty">
+      <div class="empty-ico">${hasFilter ? '🔎' : '🎉'}</div>
+      <strong>${hasFilter ? 'Không tìm thấy khoản nợ phù hợp' : 'Hiện không có khoản công nợ nào chưa thu!'}</strong>
+      <p>${hasFilter ? 'Thử xóa từ khóa hoặc đổi bộ lọc.' : 'Khi tạo Note đơn mà khách chưa thanh toán đủ, đơn sẽ tự động được ghi nợ vào đây. Bạn cũng có thể bấm "+ Ghi khoản nợ riêng" cho các khoản nợ lẻ ngoài đơn.'}</p>
+      <div class="row-actions" style="justify-content:center">
+        ${hasFilter ? `<button type="button" class="btn small" onclick="clearFilters()">Đặt lại bộ lọc</button>` : ''}
+        <button type="button" class="btn small primary" onclick="openNew('debtnote')">＋ Ghi khoản nợ riêng</button>
+      </div>
+    </div>`);
+
+  return { allEntries, openEntries, totalCount: openEntries.length, filteredCount: filtered.length, tableHtml, summaryHtml };
+}
+
+function debtsPage() {
+  const data = getDebtsViewData();
+  const autoOpen = data.openEntries.filter(e => e.kind === 'order' || e.kind === 'extraship');
+  const manualAll = data.allEntries.filter(e => e.kind === 'debtnote');
+  const manualOpen = manualAll.filter(e => !e.settled);
+  const settledManual = manualAll.filter(e => e.settled);
+  const oldOpen = data.openEntries.filter(e => e.isOldPeriod);
+
+  const totalDebtAll = data.openEntries.reduce((s, e) => s + e.remainingDebt, 0);
+  const totalAutoDebt = autoOpen.reduce((s, e) => s + e.remainingDebt, 0);
+  const totalManualDebt = manualOpen.reduce((s, e) => s + e.remainingDebt, 0);
+
+  // Gom công nợ theo từng khách hàng ở phần cuối trang
+  const custGroup = [];
+  data.openEntries.forEach(e => {
+    let cur = custGroup.find(c => sameCustomer(e, c));
+    if (!cur) {
+      cur = { customer: e.customer, phone: e.phone, code: e.code, totalDebt: 0, autoDebt: 0, manualDebt: 0, count: 0, items: [] };
+      custGroup.push(cur);
+    }
+    cur.totalDebt += e.remainingDebt;
+    if (e.kind === 'debtnote') cur.manualDebt += e.remainingDebt;
+    else cur.autoDebt += e.remainingDebt;
+    cur.count += 1;
+    cur.items.push(e);
+  });
+  custGroup.sort((a, b) => b.totalDebt - a.totalDebt);
+
+  const hasFilter = Boolean(query || window.statusFilter);
+
+  return `<div class="section-stack">
+    <div class="cashflow-grid">
+      <div class="cash-card profit-highlight" style="cursor:pointer" onclick="setFilter('')">
+        <span class="cash-label">📥 1. TỔNG CÔNG NỢ CÒN PHẢI THU (Tất cả nguồn)</span>
+        <strong class="cash-val ${totalDebtAll > 0 ? 'expense-color' : 'income-color'}">${money(totalDebtAll)} ₫</strong>
+        <span class="cash-sub">${custGroup.length} khách đang nợ · Bảo toàn xuyên kỳ ngày 26 &amp; vẫn hiện ở phần cuối Dashboard</span>
+      </div>
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('__debt_auto')">
+        <span class="cash-label">🧮 2. Nợ tự động gom từ các Đơn (${autoOpen.length} đơn)</span>
+        <strong class="cash-val blue-color">${money(totalAutoDebt)} ₫</strong>
+        <span class="cash-sub">Tự động ghi nợ mỗi khi đơn có tiền khách trả nhỏ hơn tổng phải thu</span>
+      </div>
+      <div class="cash-card" style="cursor:pointer" onclick="setFilter('__debt_manual')">
+        <span class="cash-label">📝 3. Mục Ghi nợ riêng ngoài đơn (${manualOpen.length} đang mở)</span>
+        <strong class="cash-val amber-color">${money(totalManualDebt)} ₫</strong>
+        <span class="cash-sub">Đã thu xong: ${settledManual.length} khoản · Bấm "＋ Ghi khoản nợ riêng" để thêm nhanh</span>
+      </div>
+    </div>
+
+    <div class="stage-strip" aria-label="Lọc nhanh Sổ Ghi Nợ">
+      <button type="button" class="chip ${window.statusFilter === '' ? 'active' : ''}" onclick="setFilter('')">⚠️ Tất cả đang nợ <span class="chip-count">${data.openEntries.length}</span></button>
+      <button type="button" class="chip ${window.statusFilter === '__debt_auto' ? 'active' : ''}" onclick="setFilter('__debt_auto')">🧮 Tự ghi từ Đơn <span class="chip-count">${autoOpen.length}</span></button>
+      <button type="button" class="chip ${window.statusFilter === '__debt_manual' ? 'active' : ''}" onclick="setFilter('__debt_manual')">📝 Ghi nợ riêng <span class="chip-count">${manualAll.length}</span></button>
+      ${oldOpen.length > 0 ? `<button type="button" class="chip ${window.statusFilter === '__debt_old' ? 'active' : ''}" onclick="setFilter('__debt_old')">🔒 Nợ kỳ trước chuyển sang <span class="chip-count">${oldOpen.length}</span></button>` : ''}
+      <button type="button" class="chip ${window.statusFilter === '__debt_paid' ? 'active' : ''}" onclick="setFilter('__debt_paid')">✓ Ghi nợ riêng đã thu <span class="chip-count">${settledManual.length}</span></button>
+    </div>
+
+    ${data.summaryHtml}
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">📒 Bảng chi tiết Sổ Ghi Nợ (Tự động từ Đơn + Ghi nợ riêng)</div>
+          <div class="panel-sub">Bấm <b>Thu đủ</b> hoặc <b>Thu bớt</b> để ghi nhận khách trả tiền ngay (dòng tiền tự vào đúng kỳ hiện tại, đơn gốc vẫn giữ nguyên ở bảng đơn &amp; phần cuối).</div>
+        </div>
+        <div class="row-actions">
+          <button type="button" class="btn small" onclick="exportDebtsCsv()">📊 Xuất Excel Công nợ</button>
+          <button type="button" class="btn small primary" onclick="openNew('debtnote')">＋ Ghi khoản nợ riêng</button>
+          <span class="result-count" id="resultCount">${data.filteredCount} / ${data.totalCount} khoản</span>
+        </div>
+      </div>
+      <div class="filters">
+        <div class="search">
+          <span class="search-ico" aria-hidden="true">⌕</span>
+          <input id="searchInput" class="field" placeholder="Tìm tên khách hàng, SĐT, mã DR, nội dung nợ hoặc tên mặt hàng…" value="${esc(query)}" oninput="handleSearch(this)">
+          <button type="button" id="searchClearBtn" class="search-clear ${query ? '' : 'hidden'}" onclick="clearSearchInput()" title="Xóa từ khóa">×</button>
+        </div>
+        <button type="button" id="resetFilterBtn" class="btn subtle small ${hasFilter ? '' : 'hidden'}" onclick="clearFilters()">Đặt lại lọc</button>
+      </div>
+      <div class="table-wrap" id="tableArea">${data.tableHtml}</div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">👥 Phần cuối · Tổng hợp Công nợ gom theo từng Khách hàng (${custGroup.length} khách)</div>
+          <div class="panel-sub">Gộp chung cả Nợ tự động từ các đơn lẫn Khoản ghi nợ riêng của cùng 1 khách để đối chiếu &amp; nhắc nợ Zalo 1 chạm</div>
+        </div>
+      </div>
+      ${custGroup.length ? custGroup.map(c => {
+        const custKey = jsArg(c.code || c.phone || c.customer);
+        return `<div class="todo-row">
+          <div class="todo-left">
+            <div class="mini-avatar">${avatar(c.customer)}</div>
+            <div class="todo-info">
+              <div class="todo-title">
+                <span>${esc(c.customer)}</span>
+                ${c.code ? `<span class="code">${esc(c.code)}</span>` : ''}
+                ${c.phone ? `<span class="subline">${esc(c.phone)}</span>` : ''}
+                <span class="debt-pill owe">${c.count} khoản chưa thu</span>
+              </div>
+              <div class="todo-meta">
+                ${c.autoDebt > 0 ? `<span>Nợ đơn: <b>${money(c.autoDebt)} ₫</b></span>` : ''}
+                ${c.manualDebt > 0 ? `<span>${c.autoDebt > 0 ? '· ' : ''}Ghi nợ riêng: <b class="amber-color">${money(c.manualDebt)} ₫</b></span>` : ''}
+                <span>· Chi tiết: ${c.items.map(it => `${esc(it.title)} (${money(it.remainingDebt)} ₫)`).join(' + ')}</span>
+              </div>
+            </div>
+          </div>
+          <div class="todo-right">
+            <b class="expense-color" style="font-size:15px">${money(c.totalDebt)} ₫</b>
+            <button type="button" class="iconbtn danger-tint" onclick="copyCustomerDebtZalo('${custKey}')">📋 Nhắc nợ Zalo</button>
+            <button type="button" class="iconbtn primary-tint" onclick="settleAllCustomerDebts('${custKey}')">✓ Thu hết khách này</button>
+            <button type="button" class="iconbtn" onclick="openForCustomer('debtnote','${custKey}')">＋ Ghi nợ thêm</button>
+          </div>
+        </div>`;
+      }).join('') : '<div class="empty" style="padding:20px"><p>✓ Hiện không có khách hàng nào còn nợ.</p></div>'}
+    </section>
+  </div>`;
+}
+
+function onSelectDebtNoteOrder(orderId) {
+  const ord = (db.orderNotes || []).find(x => x.id === orderId);
+  if (!ord) return;
+  const custInp = document.getElementById('f_customer');
+  const phoneInp = document.getElementById('f_phone');
+  const codeInp = document.getElementById('f_orderCode');
+  const reasonInp = document.getElementById('f_reason');
+  if (custInp && !custInp.value.trim()) custInp.value = ord.customer || '';
+  if (phoneInp && !phoneInp.value.trim()) phoneInp.value = ord.phone || '';
+  if (codeInp) codeInp.value = ord.code || '';
+  if (reasonInp && !reasonInp.value.trim()) {
+    const m = calcOrderMetrics(ord);
+    if (m.shipCharge > 0) {
+      reasonInp.value = `Ghi nợ cước vận chuyển đơn ${ord.product || ord.goodsType}`;
+      const amtInp = document.getElementById('f_amount');
+      if (amtInp && !amtInp.value.trim()) amtInp.value = String(m.shipCharge);
+    } else {
+      reasonInp.value = `Khoản nợ phát sinh thêm đơn ${ord.product || ord.goodsType}`;
+    }
+  }
+  updateDebtNoteCalcPreview();
+}
+
+function updateDebtNoteCalcPreview() {
+  const zone = document.getElementById('calcPreviewZone');
+  if (!zone) return;
+  const amount = Math.max(0, Math.round(parseNum(val('amount'))));
+  const status = val('status') || 'Chưa thu';
+  const rawPaid = Math.max(0, Math.round(parseNum(val('paidAmount'))));
+  const paid = status === 'Đã thu' ? amount : status === 'Chưa thu' ? 0 : Math.min(amount, rawPaid);
+  const rem = Math.max(0, amount - paid);
+
+  zone.innerHTML = `<div class="ai-calc-box">
+    <div class="ai-calc-top">
+      <strong style="font-size:13.5px">📒 Tổng kết Khoản Ghi Nợ Riêng: <span class="${rem > 0 ? 'expense-color' : 'income-color'}" style="font-size:17px">${rem > 0 ? `Còn nợ ${money(rem)} ₫` : '✓ Đã thu đủ'}</span></strong>
+      <span style="font-size:12px;color:var(--muted)">Sau khi lưu sẽ tự hiện trong <b>Sổ Ghi Nợ</b> và ở <b>phần cuối trang Tổng quan (Tasks · Công nợ mở)</b> như bình thường</span>
+    </div>
+    <div class="ai-calc-metrics" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div class="ai-mini"><span>Tổng số tiền ghi nợ</span><b>${money(amount)} ₫</b></div>
+      <div class="ai-mini"><span>Khách đã thanh toán</span><b class="income-color">${money(paid)} ₫</b></div>
+      <div class="ai-mini"><span>Số tiền còn phải thu</span><b class="${rem > 0 ? 'expense-color' : 'income-color'}">${money(rem)} ₫</b></div>
+    </div>
+  </div>`;
+}
+
+// ============================================================================
 // BIỂU MẪU (MODAL) GỌN GÀNG THEO TỪNG BƯỚC & LƯU AN TOÀN TUYỆT ĐỐI
 // ============================================================================
 function markFormDirty() {
@@ -4604,6 +5369,8 @@ function markFormDirty() {
     updateOrderCalcPreview();
   } else if (kind === 'packitem') {
     updatePackItemCalcPreview();
+  } else if (kind === 'debtnote') {
+    updateDebtNoteCalcPreview();
   }
 }
 
@@ -4669,6 +5436,7 @@ function openForCustomer(kind, key) {
       platform: c.platform || 'Taobao'
     });
     if (kind === 'order') updateOrderCalcPreview();
+    if (kind === 'debtnote') updateDebtNoteCalcPreview();
   }
 }
 
@@ -4676,17 +5444,18 @@ function openNewPackItem(cat = 'wood') {
   openNew('packitem', { category: cat, unit: cat === 'shock' ? 'Lần sử dụng' : cat === 'carton' ? 'Thùng' : 'Cái', qty: 1 });
 }
 
-function openNew(kind = view === 'purchases' ? 'purchase' : view === 'finance' ? 'finance' : view === 'shipments' ? 'shipment' : view === 'incidentals' ? (incTab === 'extraship' ? 'extraship' : 'packitem') : 'order', preset = {}) {
+function openNew(kind = view === 'debts' ? 'debtnote' : view === 'purchases' ? 'purchase' : view === 'finance' ? 'finance' : view === 'shipments' ? 'shipment' : view === 'incidentals' ? (incTab === 'extraship' ? 'extraship' : 'packitem') : 'order', preset = {}) {
   const form = document.getElementById('recordForm');
   form.reset();
   form.dataset.kind = kind;
   form.dataset.id = '';
   formDirty = false;
   hideFormError();
-  document.getElementById('modalBox')?.classList.toggle('wide', kind === 'order' || kind === 'packitem');
+  document.getElementById('modalBox')?.classList.toggle('wide', kind === 'order' || kind === 'packitem' || kind === 'debtnote');
 
   document.getElementById('modalTitle').textContent =
     kind === 'order' ? 'Tạo Note đơn & Tính lãi tự động' :
+    kind === 'debtnote' ? '📒 Ghi khoản nợ riêng (Tự đồng bộ Sổ Ghi Nợ & Phần cuối)' :
     kind === 'extraship' ? 'Thêm Cước ship phát sinh (Khách thanh toán)' :
     kind === 'packitem' ? 'Thêm sản phẩm / dịch vụ đóng gói' :
     kind === 'purchase' ? 'Thêm yêu cầu mua hộ' :
@@ -4702,6 +5471,7 @@ function openNew(kind = view === 'purchases' ? 'purchase' : view === 'finance' ?
   renderFields(kind, preset);
   if (kind === 'order') updateOrderCalcPreview();
   else if (kind === 'packitem') updatePackItemCalcPreview();
+  else if (kind === 'debtnote') updateDebtNoteCalcPreview();
   else document.getElementById('calcPreviewZone').innerHTML = '';
 
   document.getElementById('modal').classList.add('open');
@@ -4791,6 +5561,7 @@ function makeShipmentFromPurchase(id) {
 function editRecord(kind, id) {
   const list =
     kind === 'order' ? db.orderNotes :
+    kind === 'debtnote' ? db.debtNotes :
     kind === 'shipment' ? db.shipments :
     kind === 'purchase' ? db.purchases :
     kind === 'extraship' ? db.extraShipments :
@@ -4804,10 +5575,11 @@ function editRecord(kind, id) {
   form.dataset.id = id;
   formDirty = false;
   hideFormError();
-  document.getElementById('modalBox')?.classList.toggle('wide', kind === 'order' || kind === 'packitem');
+  document.getElementById('modalBox')?.classList.toggle('wide', kind === 'order' || kind === 'packitem' || kind === 'debtnote');
 
   document.getElementById('modalTitle').textContent =
     kind === 'order' ? 'Cập nhật Note đơn · Đóng gói & Bảng tính' :
+    kind === 'debtnote' ? 'Cập nhật Khoản Ghi Nợ Riêng' :
     kind === 'extraship' ? 'Cập nhật Cước ship phát sinh' :
     kind === 'packitem' ? 'Cập nhật sản phẩm / dịch vụ đóng gói' :
     kind === 'purchase' ? 'Cập nhật yêu cầu mua hộ' :
@@ -4822,6 +5594,7 @@ function editRecord(kind, id) {
   renderFields(kind, o);
   if (kind === 'order') updateOrderCalcPreview();
   else if (kind === 'packitem') updatePackItemCalcPreview();
+  else if (kind === 'debtnote') updateDebtNoteCalcPreview();
   else document.getElementById('calcPreviewZone').innerHTML = '';
 
   renderRecordHistory(o);
@@ -4911,6 +5684,16 @@ function fillFullCustomerPay() {
     inp.value = String(Math.max(0, m.totalCollectCustomer - m.extraShipPaid));
     formDirty = true;
     updateOrderCalcPreview();
+  }
+}
+
+function fillZeroCustomerPayDebt() {
+  const inp = document.getElementById('f_customerPaid');
+  if (inp) {
+    inp.value = '0';
+    formDirty = true;
+    updateOrderCalcPreview();
+    toast('📒 Đã đặt Đã thanh toán = 0 ₫ — khi lưu sẽ tự ghi nợ vào Sổ Ghi Nợ và vẫn hiện ở phần cuối!');
   }
 }
 
@@ -5077,7 +5860,7 @@ function updateOrderCalcPreview() {
       <div>
         <strong style="font-size:13.5px">🤖 Lợi nhuận thực tế đơn này: <span class="${m.netProfit >= 0 ? 'income-color' : 'expense-color'}" style="font-size:17px">${m.netProfit >= 0 ? '+' : ''}${money(m.netProfit)} ₫</span></strong>
       </div>
-      <span style="font-size:12px;color:var(--muted)">Phải thu khách: <b>${money(m.totalCollectCustomer)} ₫</b>${m.extraShipTotal > 0 ? ` (gồm Cước ship phát sinh +${money(m.extraShipTotal)} ₫)` : ''} · ${m.customerDebt > 0 ? `<b class="expense-color">Còn nợ ${money(m.customerDebt)} ₫</b>` : m.totalCollectCustomer > 0 ? '<b class="income-color">✓ Đã thu đủ</b>' : '<span>Chưa phát sinh phải thu</span>'}</span>
+      <span style="font-size:12px;color:var(--muted)">Phải thu khách: <b>${money(m.totalCollectCustomer)} ₫</b>${m.extraShipTotal > 0 ? ` (gồm Cước ship phát sinh +${money(m.extraShipTotal)} ₫)` : ''} · ${m.customerDebt > 0 ? `<b class="expense-color">📒 Tự động ghi nợ: ${money(m.customerDebt)} ₫</b>` : m.totalCollectCustomer > 0 ? '<b class="income-color">✓ Đã thu đủ</b>' : '<span>Chưa phát sinh phải thu</span>'}</span>
     </div>
     <div class="pipeline-track" style="height:8px">
       <div style="width:${wShip}%;background:#20a8d8"></div>
@@ -5282,9 +6065,11 @@ function renderFields(kind, o) {
         <div>
           <label for="f_customerPaid">Tiền khách đã thanh toán (₫)</label>
           <div class="input-with-btn">
-            <input id="f_customerPaid" class="field" type="text" inputmode="decimal" value="${esc(o.customerPaid ?? '')}" placeholder="0 (hoặc số tiền khách cọc)">
+            <input id="f_customerPaid" class="field" type="text" inputmode="decimal" value="${esc(o.customerPaid ?? '')}" placeholder="0 = Tự động ghi nợ đơn này">
+            <button type="button" class="btn small" onclick="fillZeroCustomerPayDebt()" title="Đặt = 0 để tự động ghi nợ đơn vào Sổ Ghi Nợ">📝 Ghi nợ</button>
             <button type="button" class="btn small primary" onclick="fillFullCustomerPay()">Thu đủ</button>
           </div>
+          <span class="field-hint">Để trống hoặc bấm <b>📝 Ghi nợ</b> → tự ghi nợ vào Sổ Ghi Nợ và vẫn hiện ở phần cuối như bình thường</span>
         </div>
         ${field('extraCost', 'Chi phí phát sinh nội bộ (₫)', o.extraCost || '', 'money', false, false, 'Phụ phí nội bộ nếu có…')}
 
@@ -5325,6 +6110,35 @@ function renderFields(kind, o) {
       ${field('paidAmount', 'Số tiền đã thu (₫) (nếu Thu một phần)', o.paidAmount ?? '', 'money', false, false, 'Tự động thu đủ nếu chọn Đã thu')}
       <div class="full" style="font-size:12px;color:var(--muted);background:var(--paper-subtle);padding:8px 11px;border-radius:6px;border:1px solid var(--line-soft)">
         ℹ️ <b>Lưu ý:</b> Đây là khoản tiền khách hàng phải thanh toán thêm (được cộng vào số tiền khách cần trả của đơn hàng liên kết), <b>không phải lợi nhuận mặc định của hệ thống</b>.
+      </div>
+    `;
+    return;
+  }
+
+  if (kind === 'debtnote') {
+    const orderChoices = (db.orderNotes || []).filter(x => x.status !== 'Đã hủy');
+    document.getElementById('formFields').innerHTML = `
+      <div class="form-card">
+        <div class="form-card-title"><span>📒 Thông tin Khoản Ghi Nợ Riêng</span></div>
+        <div class="full">
+          <label for="f_orderId">Gắn tham chiếu với đơn hàng (Tùy chọn — tự điền Tên khách, SĐT, Mã đơn; hoặc bỏ trống nếu ghi nợ lẻ)</label>
+          <select id="f_orderId" class="select" onchange="onSelectDebtNoteOrder(this.value)">
+            <option value="">-- Không gắn đơn (Ghi nợ lẻ / Nợ riêng ngoài đơn) --</option>
+            ${orderChoices.map(ord => `<option value="${esc(ord.id)}" ${o.orderId === ord.id ? 'selected' : ''}>${esc(ord.code || ord.id)} · ${esc(ord.customer)} (${esc(ord.product || ord.goodsType)}${ord.shipCharge ? ` · Cước VC ${money(ord.shipCharge)}đ` : ''})</option>`).join('')}
+          </select>
+        </div>
+        ${field('customer', 'Tên khách hàng', o.customer || '', 'text', true, false, 'Ví dụ: Nguyễn Văn A', 'list="customerSuggestions" onchange="autofillCustomerInfo(this.value)"')}
+        ${field('phone', 'Số điện thoại khách', o.phone || '', 'tel', false, false, '09xx xxx xxx')}
+        ${field('orderCode', 'Mã khách / Mã đơn tham chiếu', o.orderCode || o.code || '', 'text', false, false, 'Ví dụ: DR0006')}
+        ${field('date', 'Ngày ghi nợ', o.date || dateKey(), 'date', true)}
+        ${field('reason', 'Nội dung ghi nợ', o.reason || '', 'text', true, true, 'Ví dụ: Ghi nợ tiền cước vận chuyển về VN, khách nợ ứng trước, nợ gộp lẻ…')}
+        ${field('amount', 'Số tiền ghi nợ (₫)', o.amount ?? '', 'money', true, false, 'Ví dụ: 180000')}
+        ${selectField('status', 'Trạng thái thu nợ', debtNoteStatuses, o.status || 'Chưa thu', false, 'updateDebtNoteCalcPreview()')}
+        ${field('paidAmount', 'Số tiền khách đã trả bớt (₫) (nếu Thu một phần)', o.paidAmount ?? '', 'money', false, true, 'Để trống hoặc 0 nếu khách chưa trả')}
+        <div class="full">
+          <label for="f_note">Ghi chú thêm (Tự gắn giờ &amp; ngày tháng năm ở cuối)</label>
+          <textarea id="f_note" class="field" placeholder="Ghi chú hẹn ngày thanh toán hoặc chi tiết đối chiếu…">${esc(o.note || '')}</textarea>
+        </div>
       </div>
     `;
     return;
@@ -5530,6 +6344,81 @@ function saveRecord(e) {
     closeModal();
     render();
     toast(`✓ Đã lưu Cước ship phát sinh (${stamp})`);
+    return;
+  }
+
+  if (kind === 'debtnote') {
+    const customer = val('customer');
+    const reason = val('reason');
+    const amount = Math.round(parseNum(val('amount')));
+    if (!customer) {
+      showFormError('Vui lòng nhập Tên khách hàng.', 'customer');
+      return;
+    }
+    if (!reason) {
+      showFormError('Vui lòng nhập Nội dung ghi nợ.', 'reason');
+      return;
+    }
+    if (amount <= 0) {
+      showFormError('Vui lòng nhập Số tiền ghi nợ lớn hơn 0.', 'amount');
+      return;
+    }
+    if (!Array.isArray(db.debtNotes)) db.debtNotes = [];
+    const prev = db.debtNotes.find(x => x.id === id);
+    const status = val('status') || 'Chưa thu';
+    const rawPaid = Math.round(parseNum(val('paidAmount')));
+    const paidAmount = status === 'Đã thu' ? amount : status === 'Chưa thu' ? 0 : Math.min(amount, Math.max(0, rawPaid));
+    const history = Array.isArray(prev?.history) ? [...prev.history] : [];
+    const existingCust = findExistingCustomer(customer, val('phone'), val('orderCode'));
+
+    const item = {
+      id: id || ('dn_' + makeId()),
+      orderId: val('orderId') || prev?.orderId || '',
+      orderCode: val('orderCode') || prev?.orderCode || existingCust?.code || '',
+      code: val('orderCode') || prev?.code || existingCust?.code || nextCustomerCode(),
+      customer,
+      phone: val('phone') || prev?.phone || existingCust?.phone || '',
+      reason,
+      amount,
+      paidAmount,
+      date: val('date') || dateKey(),
+      status,
+      note: stampNote(val('note'), prev?.note || ''),
+      updatedAt: stamp,
+      updatedAtMs: nowMs,
+      history
+    };
+    const detail = `${item.customer} · ${item.reason}: ${money(item.amount)} ₫ (${item.status})`;
+    item.history.unshift({ time: stampFull, action: prev ? 'Chỉnh sửa' : 'Tạo mới', detail });
+    addAuditLog(prev ? 'Sửa ghi nợ riêng' : 'Thêm ghi nợ riêng', item.customer, detail);
+
+    const prevPaid = prev ? getDebtNoteCurrentPaid(prev) : 0;
+    const nextPaid = getDebtNoteCurrentPaid(item);
+    if (!prev && nextPaid > 0) {
+      recordPaymentEvent({
+        kind: 'debtnote', debtNoteId: item.id, orderId: item.orderId, orderCode: item.orderCode,
+        customer: item.customer, amount: nextPaid, date: item.date, originDate: item.date,
+        note: `Thu ghi nợ riêng: ${item.reason}`
+      });
+    } else if (prev && nextPaid > prevPaid) {
+      recordPaymentEvent({
+        kind: 'debtnote', debtNoteId: item.id, orderId: item.orderId, orderCode: item.orderCode,
+        customer: item.customer, amount: nextPaid - prevPaid, date: dateKey(), originDate: item.date,
+        note: `Thu thêm ghi nợ riêng: ${item.reason}`
+      });
+    } else if (prev && nextPaid < prevPaid) {
+      reducePaymentEvents('debtnote', item.id, prevPaid - nextPaid);
+    }
+
+    if (!prev || prev.amount !== item.amount || prev.date !== item.date || prev.reason !== item.reason) {
+      recordClosedPeriodAdjustment(item.date, prev ? 'Sửa ghi nợ riêng kỳ đã chốt' : 'Bổ sung ghi nợ riêng vào kỳ đã chốt', item.customer, detail);
+    }
+
+    db.debtNotes = prev ? db.debtNotes.map(x => x.id === id ? item : x) : [item, ...db.debtNotes];
+    if (!persist()) return;
+    closeModal();
+    render();
+    toast(`✓ Đã lưu vào Sổ Ghi Nợ & hiển thị ở phần cuối (${stamp})`);
     return;
   }
 
@@ -5775,6 +6664,7 @@ function deleteRecord(confirmedInline = false) {
   if (!confirmedInline && !confirm('Xóa mục này khỏi danh sách?')) return;
   const key =
     kind === 'order' ? 'orderNotes' :
+    kind === 'debtnote' ? 'debtNotes' :
     kind === 'shipment' ? 'shipments' :
     kind === 'purchase' ? 'purchases' :
     kind === 'extraship' ? 'extraShipments' :
@@ -5782,12 +6672,13 @@ function deleteRecord(confirmedInline = false) {
     'transactions';
   const target = (db[key] || []).find(x => x.id === id);
   saveAutoSnapshot(`Trước khi xóa ${target?.customer || target?.name || id}`, true);
-  if (target?.date) recordClosedPeriodAdjustment(target.date, 'Xóa bản ghi kỳ đã chốt', target?.customer || target?.name || target?.category || id, `Đã xóa ${target?.product || target?.name || target?.content || target?.category || id}`);
+  if (target?.date) recordClosedPeriodAdjustment(target.date, 'Xóa bản ghi kỳ đã chốt', target?.customer || target?.name || target?.category || id, `Đã xóa ${target?.product || target?.reason || target?.name || target?.content || target?.category || id}`);
   markDeletedId(id);
   if (kind === 'order') purgePaymentsForDeletedRecord('order', id);
   if (kind === 'extraship') purgePaymentsForDeletedRecord('extraship', id);
+  if (kind === 'debtnote') purgePaymentsForDeletedRecord('debtnote', id);
   db[key] = (db[key] || []).filter(x => x.id !== id);
-  addAuditLog('Xóa bản ghi', target?.customer || target?.name || target?.category || 'Bản ghi', `Đã xóa ${target?.product || target?.name || target?.content || target?.category || id}`);
+  addAuditLog('Xóa bản ghi', target?.customer || target?.name || target?.category || 'Bản ghi', `Đã xóa ${target?.product || target?.reason || target?.name || target?.content || target?.category || id}`);
   persist();
   closeModal();
   render();
@@ -5862,6 +6753,7 @@ function importData(e, mergeMode = false) {
         purchases: filterOutDeleted(d.purchases, inDel),
         transactions: filterOutDeleted(d.transactions, inDel),
         extraShipments: filterOutDeleted(d.extraShipments, inDel),
+        debtNotes: filterOutDeleted(d.debtNotes, inDel),
         packagingCatalog: resolvePackagingCatalog(d.packagingCatalog, inDel, Boolean(d._catalogInitialized || Array.isArray(d.packagingCatalog))),
         logs: Array.isArray(d.logs) ? d.logs : [],
         paymentRecords: filterOutDeleted(d.paymentRecords, inDel),
@@ -5956,6 +6848,7 @@ function dbCounts(d = db) {
     purchases: (d.purchases || []).length,
     transactions: (d.transactions || []).length,
     extraShipments: (d.extraShipments || []).length,
+    debtNotes: (d.debtNotes || []).length,
     packagingCatalog: (d.packagingCatalog || []).length
   };
 }
@@ -6022,6 +6915,7 @@ function restoreAutoSnapshot(snapId) {
     purchases: filterOutDeleted(d.purchases, snapDel),
     transactions: filterOutDeleted(d.transactions, snapDel),
     extraShipments: filterOutDeleted(d.extraShipments, snapDel),
+    debtNotes: filterOutDeleted(d.debtNotes, snapDel),
     packagingCatalog: resolvePackagingCatalog(d.packagingCatalog, snapDel, Boolean(d._catalogInitialized || Array.isArray(d.packagingCatalog))),
     logs: Array.isArray(d.logs) ? d.logs : [],
     paymentRecords: filterOutDeleted(d.paymentRecords, snapDel),
@@ -6054,10 +6948,11 @@ function isUntouchedSeedDB(candidate) {
   const buys = candidate.purchases || [];
   const txs = candidate.transactions || [];
   const extras = candidate.extraShipments || [];
+  const dnotes = candidate.debtNotes || [];
   const packs = candidate.packagingCatalog || [];
 
   if (orders.length !== 2 || ships.length !== 3 || buys.length !== 2 || txs.length !== 2) return false;
-  if (extras.length > 0) return false;
+  if (extras.length > 0 || dnotes.length > 0) return false;
   if (orders.some(x => !seedOrderIds.has(x.id) || (x.history && x.history.length > 1) || x.updatedAtMs)) return false;
   if (ships.some(x => !seedShipIds.has(x.id) || (x.history && x.history.length > 0) || x.updatedAtMs)) return false;
   if (buys.some(x => !seedBuyIds.has(x.id) || (x.history && x.history.length > 0) || x.updatedAtMs)) return false;
@@ -6075,6 +6970,7 @@ function normalizeIncomingDB(raw) {
     purchases: toArr(raw.purchases),
     transactions: toArr(raw.transactions),
     extraShipments: toArr(raw.extraShipments),
+    debtNotes: toArr(raw.debtNotes),
     packagingCatalog: toArr(raw.packagingCatalog),
     logs: toArr(raw.logs),
     paymentRecords: toArr(raw.paymentRecords),
@@ -6089,7 +6985,7 @@ function smartMergeDB(localDb, remoteRaw, opts = {}) {
 
   const remoteHasData =
     remoteDb.orderNotes.length + remoteDb.shipments.length + remoteDb.purchases.length +
-    remoteDb.transactions.length + remoteDb.extraShipments.length > 0;
+    remoteDb.transactions.length + remoteDb.extraShipments.length + remoteDb.debtNotes.length > 0;
 
   // Nếu máy mới mở lần đầu (chỉ có dữ liệu mẫu chưa sửa) và trên mây đã có dữ liệu thật -> tải thẳng dữ liệu thật về
   if (remoteHasData && isUntouchedSeedDB(localDb)) {
@@ -6099,6 +6995,7 @@ function smartMergeDB(localDb, remoteRaw, opts = {}) {
       purchases: remoteDb.purchases,
       transactions: remoteDb.transactions,
       extraShipments: remoteDb.extraShipments,
+      debtNotes: remoteDb.debtNotes,
       packagingCatalog: Array.isArray(remoteDb.packagingCatalog) ? remoteDb.packagingCatalog : [],
       logs: remoteDb.logs.slice(0, 300),
       paymentRecords: remoteDb.paymentRecords,
@@ -6173,6 +7070,7 @@ function smartMergeDB(localDb, remoteRaw, opts = {}) {
     purchases: mergeList(localDb.purchases, remoteDb.purchases),
     transactions: mergeList(localDb.transactions, remoteDb.transactions),
     extraShipments: mergeList(localDb.extraShipments, remoteDb.extraShipments),
+    debtNotes: mergeList(localDb.debtNotes, remoteDb.debtNotes),
     packagingCatalog: mergedPack,
     logs: mergedLogs,
     paymentRecords: mergeList(localDb.paymentRecords, remoteDb.paymentRecords),
@@ -6614,6 +7512,20 @@ function renderNotifPopover() {
         </div>
       </div>`;
     }
+    if (item.kind === 'debtnote' || item.kind === 'extraship') {
+      const isManual = item.kind === 'debtnote';
+      return `<div class="notif-pop-item" onclick="closeNotifPopover();editRecord('${item.kind}','${item.id}')">
+        <div class="notif-pop-main">
+          <b>${esc(item.customer)} · ${esc(isManual ? item.reason : item.content)}</b>
+          <div class="notif-pop-tags">
+            <span class="notif-tag owe">${isManual ? '📝 Ghi nợ riêng' : '🚚 Ship PS'}: ${money(item.remainingDebt || 0)} ₫</span>
+          </div>
+        </div>
+        <div class="notif-pop-actions" onclick="event.stopPropagation()">
+          <button type="button" class="iconbtn primary-tint" onclick="${isManual ? `settleDebtNote('${item.id}')` : `settleExtraShip('${item.id}')`};renderNotifPopover()">Thu đủ</button>
+        </div>
+      </div>`;
+    }
     const isShip = item.kind === 'shipment';
     return `<div class="notif-pop-item" onclick="closeNotifPopover();editRecord('${item.kind}','${item.id}')">
       <div class="notif-pop-main">
@@ -6942,6 +7854,16 @@ function buildAppContextForDeepSeek() {
       debtMap.set(k, cur);
     }
   });
+  (db.debtNotes || []).forEach(d => {
+    const rem = getDebtNoteRemaining(d);
+    if (rem > 0) {
+      const k = d.customer || 'Khách lẻ';
+      const cur = debtMap.get(k) || { customer: k, totalDebt: 0, orders: 0 };
+      cur.totalDebt += rem;
+      cur.orders += 1;
+      debtMap.set(k, cur);
+    }
+  });
   const topDebts = [...debtMap.values()].sort((a, b) => b.totalDebt - a.totalDebt).slice(0, 20);
 
   const compactOrders = ordersInPeriod.slice(0, 35).map(o => {
@@ -6961,6 +7883,7 @@ function buildAppContextForDeepSeek() {
   const viewNames = {
     overview: 'Dashboard Tổng quan',
     orders: 'Note đơn · Dịch vụ Đóng gói & Tính lãi',
+    debts: 'Sổ Ghi Nợ (Tự gom nợ đơn & Ghi nợ riêng)',
     incidentals: `Chi phí phát sinh & Đóng gói (Tab đang mở: ${incTab === 'extraship' ? '1. Cước ship phát sinh' : incTab === 'wood' ? '2. Đóng hộp gỗ' : incTab === 'carton' ? '3. Đóng hộp carton' : '4. Chống sốc'})`,
     finance: `Thu chi & Báo cáo (Tab đang mở: ${financeTab === 'cashflow' ? 'Thu chi & Dòng tiền' : financeTab === 'periods' ? 'Kỳ chốt 26' : financeTab === 'debts' ? 'Công nợ Khách & Kho' : financeTab === 'report' ? 'Báo cáo AI' : 'Lịch sử chỉnh sửa'})`,
     shipments: 'Đơn ký gửi kho (WMS)',
@@ -6981,7 +7904,8 @@ function buildAppContextForDeepSeek() {
 
 SƠ ĐỒ CHỨC NĂNG APP DAIRYCOW LOGISTICS (để tư vấn & hướng dẫn người dùng bấm đúng nút):
 1. Dashboard: 4 thẻ KPI (Lợi nhuận kỳ, Tổng thu kỳ, Tổng công nợ thực tế xuyên kỳ, Lưu lượng đơn kỳ), biểu đồ Traffic, thanh chọn Kỳ chốt ngày 26 (26/tháng này -> 25/tháng sau, tự chốt 00:00 ngày 26 giờ VN).
-2. Note đơn · Tính lãi: 4 loại Line (Xách tay, Thanh toán hộ, Ký gửi kho, Mua hộ trọn gói), chọn 9 App/Sàn (POIZON, TMALL, 1688, 95分, TAOBAO, JINGDONG, PIN DUO DUO, XIAN YU, VIP SHOP), tự tính lãi cước, lãi đóng gói, phí DV %, lãi tỷ giá tệ, công nợ khách & nút Đã trả cước kho.
+2. Note đơn · Tính lãi: 4 loại Line (Xách tay, Thanh toán hộ, Ký gửi kho, Mua hộ trọn gói), chọn 10 App/Sàn (POIZON, TMALL, 1688, 95分, TAOBAO, JINGDONG, PIN DUO DUO, XIAN YU, VIP SHOP, WECHAT), loại hàng gồm Trang sức/Mỹ phẩm/Quần áo/Giày dép..., tự tính lãi & tự động ghi nợ khi khách chưa trả đủ.
+2b. Sổ Ghi Nợ riêng (Menu trái & Thanh trên): Tự động gom mọi đơn khách đang nợ + cho thêm Khoản ghi nợ riêng ngoài đơn (đang có ${(db.debtNotes || []).filter(d => getDebtNoteRemaining(d) > 0).length} khoản ghi nợ riêng mở), sau khi ghi nợ vẫn hiện ở phần cuối trang như bình thường.
 3. Chi phí phát sinh (4 tab): 1. Cước ship phát sinh (cộng vào phải thu khách, không tính lợi nhuận mặc định), 2. Đóng hộp gỗ, 3. Đóng hộp carton, 4. Chống sốc (có công cụ chia giá vốn theo số lần dùng/cuộn). Hiện tổng lãi đóng gói: ${money(incSum.totalPackProfit)}đ (Gỗ ${money(incSum.woodProfit)}đ, Carton ${money(incSum.cartonProfit)}đ, Chống sốc ${money(incSum.shockProfit)}đ); Cước ship PS: tổng ${money(incSum.totalExtraShip)}đ (chưa thu ${money(incSum.uncollectedExtraShip)}đ).
 4. Thu chi & Báo cáo: Tab Thu chi, Kỳ chốt 26 (tra cứu lịch sử các kỳ đã chốt & đối chiếu công nợ), Công nợ Khách & Kho, Báo cáo AI, Lịch sử sửa (Audit Log).
 5. Đồng bộ & Sao lưu: Nút "☁ Đồng bộ & Sao lưu" trên thanh công cụ có đồng bộ Firebase 2 chiều + 10 mốc dự phòng tự động chống xóa nhầm + xuất/nhập JSON.
