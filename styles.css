@@ -2341,7 +2341,7 @@ tfoot td {
   align-items: center;
   justify-content: center;
   padding: 16px;
-  z-index: 40;
+  z-index: 100;
   backdrop-filter: blur(3px);
 }
 
@@ -2784,28 +2784,44 @@ textarea {
   color: var(--rose);
 }
 
-/* Toast */
+/* Toast luôn nổi trên cả Modal và không đè lên bong bóng AI góc phải */
 .toast {
   position: fixed;
   bottom: 22px;
-  right: 22px;
+  left: 50%;
+  right: auto;
+  max-width: calc(100vw - 32px);
   background: var(--core-dark);
   color: #fff;
-  padding: 11px 16px;
-  border-radius: 6px;
+  padding: 11px 18px;
+  border-radius: 999px;
   font-size: 13px;
   font-weight: 600;
-  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.24);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.28);
   opacity: 0;
-  transform: translateY(8px);
+  transform: translate(-50%, 10px);
   pointer-events: none;
   transition: opacity 0.18s var(--ease), transform 0.18s var(--ease);
-  z-index: 60;
+  z-index: 130;
 }
 
 .toast.show {
   opacity: 1;
-  transform: none;
+  transform: translate(-50%, 0);
+}
+
+.seed-cleanup-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 11px 16px;
+  border-radius: 10px;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+  font-size: 12.8px;
 }
 
 /* ==================== RESPONSIVE ==================== */
@@ -3530,7 +3546,7 @@ tr.row-selected-period {
   position: fixed;
   right: 22px;
   bottom: 22px;
-  z-index: 96;
+  z-index: 85;
   height: 54px;
   padding: 0 18px 0 15px;
   border-radius: 999px;
@@ -3584,7 +3600,7 @@ tr.row-selected-period {
   height: 600px;
   max-width: calc(100vw - 24px);
   max-height: calc(100vh - 110px);
-  z-index: 95;
+  z-index: 88;
   opacity: 0;
   transform: translateY(16px) scale(0.96);
   transform-origin: bottom right;

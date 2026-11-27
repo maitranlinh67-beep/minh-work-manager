@@ -464,19 +464,33 @@ function stampNote(rawNew, rawPrev = '') {
   return `${next} [${nowStamp()}]`;
 }
 
-// Bộ đọc số thông minh: xử lý cả "1.500.000", "500,000", "3.650", lẫn số thập phân "168.5", "168,5", "2.5%"
+// Bộ đọc số thông minh: xử lý cả "1.500.000", "1.007.340đ", "500.000 vnđ", "1000.000", "80k", "1,5tr", lẫn số thập phân "168.5", "383.62", "2.5%"
 function parseNum(raw) {
   if (raw === null || raw === undefined) return 0;
   if (typeof raw === 'number') return Number.isFinite(raw) ? raw : 0;
-  let s = String(raw).trim().replace(/[₫¥%\s]/g, '');
+  let s = String(raw).trim();
   if (!s) return 0;
   const neg = s.startsWith('-') ? -1 : 1;
-  s = s.replace(/^[+-]/, '');
+  s = s.replace(/^[+-]/, '').trim();
 
-  if (/^\d{1,3}(\.\d{3})+$/.test(s)) {
+  const trMatch = s.match(/^(\d+(?:[.,]\d+)?)\s*(?:tr|triệu|trieu)$/i);
+  if (trMatch) {
+    const v = parseFloat(trMatch[1].replace(',', '.'));
+    return Number.isFinite(v) ? neg * Math.round(v * 1000000) : 0;
+  }
+  const kMatch = s.match(/^(\d+(?:[.,]\d+)?)\s*k$/i);
+  if (kMatch) {
+    const v = parseFloat(kMatch[1].replace(',', '.'));
+    return Number.isFinite(v) ? neg * Math.round(v * 1000) : 0;
+  }
+
+  s = s.replace(/(vnđ|vnd|đồng|dong|[₫đ¥%\s])/gi, '').replace(/[dD]$/, '');
+  if (!s) return 0;
+
+  if (/^\d{1,3}(\.\d{3})+$/.test(s) || /^\d+(\.\d{3}){2,}$/.test(s) || /^\d{4,}\.\d{3}$/.test(s)) {
     return neg * Number(s.replace(/\./g, ''));
   }
-  if (/^\d{1,3}(,\d{3})+$/.test(s)) {
+  if (/^\d{1,3}(,\d{3})+$/.test(s) || /^\d+(,\d{3}){2,}$/.test(s) || /^\d{4,},\d{3}$/.test(s)) {
     return neg * Number(s.replace(/,/g, ''));
   }
   if (s.includes('.') && s.includes(',')) {
@@ -687,11 +701,12 @@ function calcOrderMetrics(o) {
   const feeManual = Math.round(parseNum(o.serviceFeeManual));
   const extraCost = Math.round(parseNum(o.extraCost));
   const includeGoods = o.includeGoodsInFlow !== undefined ? Boolean(o.includeGoodsInFlow) : ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(o.lineType);
+  const includeShip = Boolean(o.includeShipInDebt);
 
   const finalGoodsVnd = (cny > 0 && rateSell > 0) ? Math.round(cny * rateSell) : Math.round(vndInput);
-  const baseGoodsCostVnd = (cny > 0 && rateSell > 0)
-    ? Math.round(cny * (rateBuy > 0 ? rateBuy : rateSell))
-    : Math.round(vndInput);
+  const baseGoodsCostVnd = (cny > 0 && rateBuy > 0)
+    ? Math.round(cny * rateBuy)
+    : finalGoodsVnd;
 
   // 1. Lãi phí vận chuyển = Cước thu khách - Cước gốc trả kho
   const shipProfit = shipCharge - shipCost;
@@ -702,11 +717,13 @@ function calcOrderMetrics(o) {
   // 2. Phí dịch vụ = Giá cuối sản phẩm × (% : 100), cước vận chuyển tính riêng
   const serviceFee = pct > 0 ? Math.round(finalGoodsVnd * (pct / 100)) : feeManual;
 
-  // 3. Lãi tệ = Số tệ × (Tỷ giá tệ bán - Tỷ giá tệ thu/gốc) (tự động tính ngay khi có Số tệ, Tỷ giá gốc và Tỷ giá bán)
-  const fxProfit = (cny > 0 && rateBuy > 0 && rateSell > 0) ? Math.round(cny * (rateSell - rateBuy)) : 0;
+  // 3. Lãi tệ = Số tệ × (Tỷ giá tệ bán - Tỷ giá tệ thu/gốc), hoặc Giá bán VND − (Số tệ × Tỷ giá gốc)
+  const fxProfit = (cny > 0 && rateBuy > 0)
+    ? (rateSell > 0 ? Math.round(cny * (rateSell - rateBuy)) : (finalGoodsVnd > 0 ? (finalGoodsVnd - baseGoodsCostVnd) : 0))
+    : 0;
 
   // 4. Tổng phải thu từ khách & Khung ghi nợ trực tiếp của đơn
-  const autoCollectCustomer = (includeGoods ? finalGoodsVnd : 0) + serviceFee + packCharge + extraShipTotal;
+  const autoCollectCustomer = (includeGoods ? finalGoodsVnd : 0) + (includeShip ? shipCharge : 0) + serviceFee + packCharge + extraShipTotal;
   const totalPayout = (includeGoods ? baseGoodsCostVnd : 0) + shipCost + packCost + extraCost;
 
   // 5. Lợi nhuận thực tế của đơn (KHÔNG bị biến đổi khi người dùng nhập Khung Ghi Nợ)
@@ -790,14 +807,56 @@ function getCurrentBusinessPeriod(nowInput) {
 
 function getValidPaymentRecords() {
   const del = db.deletedIds || {};
+  const validOrderIds = new Set((db.orderNotes || []).filter(o => o && o.id && o.status !== 'Đã hủy').map(o => o.id));
+  const validExtraIds = new Set((db.extraShipments || []).filter(x => x && x.id).map(x => x.id));
+  const validDebtNoteIds = new Set((db.debtNotes || []).filter(d => d && d.id).map(d => d.id));
   return (db.paymentRecords || []).filter(p => {
     if (!p || !p.id) return false;
     if (del[p.id]) return false;
-    if (p.kind === 'order' && p.orderId && del[p.orderId]) return false;
-    if (p.kind === 'extraship' && p.extraShipId && del[p.extraShipId]) return false;
-    if (p.kind === 'debtnote' && p.debtNoteId && del[p.debtNoteId]) return false;
+    if (p.kind === 'order' && p.orderId) {
+      if (del[p.orderId] || !validOrderIds.has(p.orderId)) return false;
+    }
+    if (p.kind === 'extraship' && p.extraShipId) {
+      if (del[p.extraShipId] || !validExtraIds.has(p.extraShipId)) return false;
+    }
+    if (p.kind === 'debtnote' && p.debtNoteId) {
+      if (del[p.debtNoteId] || !validDebtNoteIds.has(p.debtNoteId)) return false;
+    }
     return true;
   });
+}
+
+// Đồng bộ ngày của khoản "Thanh toán lúc tạo đơn" khi người dùng đổi ngày tạo của đơn hàng gốc
+function reconcilePaymentRecordsIntegrity() {
+  if (!Array.isArray(db.paymentRecords) || !db.paymentRecords.length) return false;
+  const orderMap = new Map((db.orderNotes || []).map(o => [o.id, o]));
+  let updated = false;
+  db.paymentRecords.forEach(p => {
+    if (!p || p.kind !== 'order' || !p.orderId) return;
+    const ord = orderMap.get(p.orderId);
+    if (!ord) return;
+    const ordDate = normalizeDateStr(ord.date);
+    if (!ordDate) return;
+    const ordPeriod = getBusinessPeriodForDate(ordDate);
+    const isInitialPay = !p.isDebtRecovery && p.date === p.originDate && String(p.note || '').startsWith('Thanh toán lúc tạo đơn');
+    if (isInitialPay && p.date !== ordDate) {
+      p.date = ordDate;
+      p.originDate = ordDate;
+      p.originPeriodId = ordPeriod.id;
+      p.paymentPeriodId = ordPeriod.id;
+      p.isDebtRecovery = false;
+      p.updatedAtMs = Date.now();
+      updated = true;
+    } else if (p.originDate !== ordDate) {
+      p.originDate = ordDate;
+      p.originPeriodId = ordPeriod.id;
+      p.paymentPeriodId = getBusinessPeriodForDate(p.date || ordDate).id;
+      p.isDebtRecovery = p.originPeriodId !== p.paymentPeriodId;
+      p.updatedAtMs = Date.now();
+      updated = true;
+    }
+  });
+  return updated;
 }
 
 function purgePaymentsForDeletedRecord(kind, targetId) {
@@ -1078,6 +1137,7 @@ function computeBusinessPeriodSnapshot(periodInfo) {
 function reconcileBusinessPeriods(nowInput, opts = {}) {
   if (!Array.isArray(db.businessPeriods)) db.businessPeriods = [];
   if (!Array.isArray(db.paymentRecords)) db.paymentRecords = [];
+  const healedPay = reconcilePaymentRecordsIntegrity();
   const curP = getCurrentBusinessPeriod(nowInput);
   const periodMap = new Map();
   db.businessPeriods.forEach(p => { if (p && p.id) periodMap.set(p.id, p); });
@@ -1164,10 +1224,10 @@ function reconcileBusinessPeriods(nowInput, opts = {}) {
     }
     addAuditLog('Tự động chốt kỳ 26', newlyClosed.join(', '), `Đã tự động chốt kỳ lúc 00:00 ngày 26 (${APP_TIMEZONE}) và mở ${curP.label} từ 0.`);
   }
-  if (changed && !opts.skipPersist) {
+  if ((changed || healedPay) && !opts.skipPersist) {
     persist({ skipSnapshot: true });
   }
-  return { currentPeriod: curP, newlyClosed, periodRolledOver, changed };
+  return { currentPeriod: curP, newlyClosed, periodRolledOver, changed: changed || healedPay };
 }
 
 function getSelectedBusinessPeriod() {
@@ -1585,6 +1645,15 @@ function renderTrafficChartCard(s, periodLabel, filterSpec = null) {
     if (lp > 0) ensure(getKey(d.date)).moneyIn += lp;
   });
 
+  (db.packagingCatalog || []).filter(item => matchDate(item.date) && parseNum(item.qty) > 0).forEach(item => {
+    const q = Math.max(0, parseNum(item.qty));
+    const c = Math.round(parseNum(item.costPrice) * q);
+    const r = Math.round(parseNum(item.sellPrice) * q);
+    const b = ensure(getKey(item.date));
+    b.moneyOut += c;
+    b.profit += (r - c);
+  });
+
   // Cộng tiền khách thanh toán (kể cả công nợ kỳ cũ) vào đúng ngày thực thu — KHÔNG cộng trùng lợi nhuận
   getValidPaymentRecords().filter(p => matchDate(p.date)).forEach(p => {
     const amt = Math.max(0, Math.round(parseNum(p.amount)));
@@ -1892,6 +1961,15 @@ function renderCashflowBarChart(filterSpec = '') {
   (db.debtNotes || []).filter(d => matchDate(d.date)).forEach(d => {
     const lp = getDebtNoteLegacyPaid(d);
     if (lp > 0) ensure(getKey(d.date)).moneyIn += lp;
+  });
+
+  (db.packagingCatalog || []).filter(item => matchDate(item.date) && parseNum(item.qty) > 0).forEach(item => {
+    const q = Math.max(0, parseNum(item.qty));
+    const c = Math.round(parseNum(item.costPrice) * q);
+    const r = Math.round(parseNum(item.sellPrice) * q);
+    const b = ensure(getKey(item.date));
+    b.moneyOut += c;
+    b.profit += (r - c);
   });
 
   getValidPaymentRecords().filter(p => matchDate(p.date)).forEach(p => {
@@ -2406,14 +2484,52 @@ function findExistingCustomer(name, phone, code) {
 }
 
 function autofillCustomerInfo(nameVal) {
-  const matched = findExistingCustomer(nameVal, '', '');
-  if (!matched) return;
-  const phoneEl = document.getElementById('f_phone');
   const codeEl = document.getElementById('f_code');
+  const matched = findExistingCustomer(nameVal, '', '');
+  if (!matched) {
+    if (codeEl && codeEl.dataset.autofilled === '1') {
+      codeEl.value = '';
+      delete codeEl.dataset.autofilled;
+    }
+    return;
+  }
+  const phoneEl = document.getElementById('f_phone');
   const addrEl = document.getElementById('f_address');
   if (phoneEl && !phoneEl.value.trim() && matched.phone) phoneEl.value = matched.phone;
-  if (codeEl && !codeEl.value.trim() && matched.code) codeEl.value = matched.code;
+  if (codeEl && (!codeEl.value.trim() || codeEl.dataset.autofilled === '1') && matched.code) {
+    codeEl.value = matched.code;
+    codeEl.dataset.autofilled = '1';
+  }
   if (addrEl && !addrEl.value.trim() && matched.address) addrEl.value = matched.address;
+}
+
+function hasResidualSeedTransactions() {
+  const hasRealOrders = (db.orderNotes || []).some(o => o && !['on1', 'on2'].includes(o.id));
+  if (!hasRealOrders) return false;
+  return (db.transactions || []).some(t => t && ['t1', 't2'].includes(t.id) && !t.updatedAtMs);
+}
+
+function cleanResidualSeedData() {
+  if (!confirm('Dọn sạch 2 giao dịch mẫu ban đầu (Minh Anh +1.200.000 ₫ & Nhà vận chuyển −700.000 ₫ ngày 05/11) và tính lại chuẩn xác báo cáo Kỳ cũ?\n\nToàn bộ đơn hàng thật của bạn được giữ nguyên 100%.')) {
+    return;
+  }
+  saveAutoSnapshot('Trước khi dọn 2 giao dịch mẫu ban đầu', true);
+  ['t1', 't2'].forEach(sid => {
+    const found = (db.transactions || []).find(t => t.id === sid && !t.updatedAtMs);
+    if (found) markDeletedId(sid);
+  });
+  db.transactions = (db.transactions || []).filter(t => !(['t1', 't2'].includes(t.id) && !t.updatedAtMs));
+  // Đồng bộ lại các kỳ đã chốt bị dính số liệu mẫu cũ
+  (db.businessPeriods || []).forEach(p => {
+    if (p && p.status === 'closed') {
+      p.snapshot = computeBusinessPeriodSnapshot(p);
+      p.updatedAtMs = Date.now();
+    }
+  });
+  addAuditLog('Dọn dữ liệu mẫu tồn dư', 'Hệ thống', 'Đã xóa giao dịch mẫu t1/t2 và tính lại chuẩn số liệu các kỳ đã chốt');
+  persist({ skipSnapshot: true });
+  render();
+  toast('✓ Đã dọn sạch giao dịch mẫu và cập nhật chuẩn 100% số liệu thật!');
 }
 
 function refreshCustomerDatalist() {
@@ -2901,6 +3017,11 @@ function overviewPage() {
 
   return `<div class="section-stack">
     ${renderBusinessPeriodBanner()}
+
+    ${hasResidualSeedTransactions() && (periodMode === 'all' || (selectedPeriodObj && selectedPeriodObj.status === 'closed')) ? `<div class="seed-cleanup-banner">
+      <span>🧹 <b>Phát hiện 2 giao dịch mẫu ban đầu</b> (<i>Minh Anh +1.200.000 ₫ / −700.000 ₫ ngày 05/11</i>) còn sót lại trong sổ cũ đang cộng lẫn vào chế độ xem này.</span>
+      <button type="button" class="btn small primary" onclick="cleanResidualSeedData()">✓ Xóa 2 giao dịch mẫu &amp; Làm chuẩn số liệu</button>
+    </div>` : ''}
 
     ${actionStrip}
 
@@ -3950,6 +4071,13 @@ function getDailyBreakdown(filterSpec) {
     if (lp > 0) ensure(normalizeDateStr(d.date) || dateKey()).collected += lp;
   });
 
+  (db.packagingCatalog || []).filter(item => matchDate(item.date) && parseNum(item.qty) > 0).forEach(item => {
+    const q = Math.max(0, parseNum(item.qty));
+    const c = Math.round(parseNum(item.costPrice) * q);
+    const r = Math.round(parseNum(item.sellPrice) * q);
+    ensure(normalizeDateStr(item.date) || dateKey()).profit += (r - c);
+  });
+
   getValidPaymentRecords().filter(p => matchDate(p.date)).forEach(p => {
     const d = normalizeDateStr(p.date) || dateKey();
     const amt = Math.max(0, Math.round(parseNum(p.amount)));
@@ -4076,8 +4204,19 @@ function renderBusinessPeriodsTab(topToolbar) {
   const periodPayments = (db.paymentRecords || []).filter(p => matchesDateFilter(p.date, { startDate: detailObj.startDate, endDate: detailObj.endDate }));
   const adjustments = Array.isArray(detailObj.adjustments) ? detailObj.adjustments : [];
 
+  const liveRecomputedSnap = isDetailClosed ? computeBusinessPeriodSnapshot(detailObj) : null;
+  const hasSnapshotDrift = Boolean(isDetailClosed && liveRecomputedSnap && (
+    (detailStats.netProfit || 0) !== (liveRecomputedSnap.netProfit || 0) ||
+    (detailStats.endingCustomerDebt || 0) !== (liveRecomputedSnap.endingCustomerDebt || 0) ||
+    (detailStats.totalCollectedFromCustomer || 0) !== (liveRecomputedSnap.totalCollectedFromCustomer || 0)
+  ));
+
   return `<div class="section-stack">
     ${topToolbar}
+    ${hasResidualSeedTransactions() ? `<div class="seed-cleanup-banner">
+      <span>🧹 <b>Phát hiện 2 giao dịch mẫu ban đầu</b> (<i>Minh Anh +1.200.000 ₫ / −700.000 ₫</i>) và đơn mẫu cũ còn lưu trong bản chốt kỳ trước.</span>
+      <button type="button" class="btn small primary" onclick="cleanResidualSeedData()">✓ Dọn sạch dữ liệu mẫu &amp; Chuẩn hóa Kỳ cũ</button>
+    </div>` : ''}
     <section class="panel">
       <div class="panel-head">
         <div>
@@ -4152,7 +4291,7 @@ function renderBusinessPeriodsTab(topToolbar) {
         </div>
         <div class="row-actions">
           <button type="button" class="btn small" onclick="openBusinessPeriodOnDashboard('${esc(detailObj.id)}')">📊 Xem Dashboard kỳ này</button>
-          ${isDetailClosed && adjustments.length > 0 && currentUserRole === 'admin' ? `<button type="button" class="btn small primary" onclick="refreshClosedPeriodSnapshotControlled('${esc(detailObj.id)}')">↻ Cập nhật báo cáo sau điều chỉnh</button>` : ''}
+          ${isDetailClosed && (adjustments.length > 0 || hasSnapshotDrift) && currentUserRole === 'admin' ? `<button type="button" class="btn small primary" onclick="refreshClosedPeriodSnapshotControlled('${esc(detailObj.id)}')">↻ Cập nhật báo cáo theo dữ liệu thật</button>` : ''}
         </div>
       </div>
 
@@ -4275,9 +4414,13 @@ function financePage() {
   if (financeTab === 'cashflow') {
     const data = getFinanceViewData();
     const hasFilter = Boolean(query || window.statusFilter);
-    const periodPayments = (db.paymentRecords || []).filter(p => matchesDateFilter(p.date, filterSpec));
+    const periodPayments = getValidPaymentRecords().filter(p => matchesDateFilter(p.date, filterSpec));
     return `<div class="section-stack">
       ${topToolbar}
+      ${hasResidualSeedTransactions() ? `<div class="seed-cleanup-banner">
+        <span>🧹 <b>Phát hiện 2 giao dịch mẫu ban đầu</b> (<i>Minh Anh +1.200.000 ₫ / −700.000 ₫ ngày 05/11</i>) còn sót lại trong sổ cũ.</span>
+        <button type="button" class="btn small primary" onclick="cleanResidualSeedData()">✓ Xóa 2 giao dịch mẫu &amp; Chuẩn hóa Kỳ cũ</button>
+      </div>` : ''}
       <div class="cashflow-grid">
         <div class="cash-card">
           <span class="cash-label">1. Tổng tiền thu trong kỳ (${esc(getPeriodLabel(filterSpec))})</span>
@@ -4391,6 +4534,20 @@ function financePage() {
         const isOldPeriod = origP.id !== curBizP.id;
         cur.debt += rem;
         cur.orders.push({ id: d.id, kind: 'debtnote', label: `Ghi nợ: ${d.reason || ''}`, amount: rem, date: d.date, isOldPeriod, periodShort: origP.shortLabel });
+      }
+    });
+    (db.extraShipments || []).filter(x => !isExtraShipLinkedToOrder(x)).forEach(x => {
+      const rem = Math.max(0, Math.round(parseNum(x.amount)) - getExtraCurrentPaid(x));
+      if (rem > 0) {
+        let cur = custDebtList.find(c => sameCustomer(x, c));
+        if (!cur) {
+          cur = { customer: x.customer, phone: '', code: x.orderCode || '', debt: 0, orders: [] };
+          custDebtList.push(cur);
+        }
+        const origP = getBusinessPeriodForDate(x.date);
+        const isOldPeriod = origP.id !== curBizP.id;
+        cur.debt += rem;
+        cur.orders.push({ id: x.id, kind: 'extraship', label: `Ship PS: ${x.content || ''}`, amount: rem, date: x.date, isOldPeriod, periodShort: origP.shortLabel });
       }
     });
 
@@ -4533,7 +4690,7 @@ function financePage() {
               <tr>
                 <th>Ngày</th>
                 <th>Số đơn</th>
-                <th>Tổng phải thu khách</th>
+                <th>Thực thu trong ngày</th>
                 <th>Tổng phí vận chuyển</th>
                 <th>Tổng phí dịch vụ</th>
                 <th>Chi phí phát sinh</th>
@@ -4544,7 +4701,7 @@ function financePage() {
               ${dailyRows.map(r => `<tr>
                 <td data-label="Ngày"><b>${dateText(r.date)}</b></td>
                 <td data-label="Số đơn">${r.orders} đơn</td>
-                <td data-label="Phải thu khách">${money(r.collected)} ₫</td>
+                <td data-label="Thực thu">${money(r.collected)} ₫</td>
                 <td data-label="Phí vận chuyển">${money(r.shipFee)} ₫</td>
                 <td data-label="Phí dịch vụ" class="blue-color">+${money(r.serviceFee)} ₫</td>
                 <td data-label="Chi phát sinh" class="expense-color">−${money(r.extra)} ₫</td>
@@ -5463,7 +5620,7 @@ function openForCustomer(kind, key) {
 }
 
 function openNewPackItem(cat = 'wood') {
-  openNew('packitem', { category: cat, unit: cat === 'shock' ? 'Lần sử dụng' : cat === 'carton' ? 'Thùng' : 'Cái', qty: 1 });
+  openNew('packitem', { category: cat, unit: cat === 'shock' ? 'Lần sử dụng' : cat === 'carton' ? 'Thùng' : 'Cái', qty: 0 });
 }
 
 function openNew(kind = view === 'debts' ? 'debtnote' : view === 'purchases' ? 'purchase' : view === 'finance' ? 'finance' : view === 'shipments' ? 'shipment' : view === 'incidentals' ? (incTab === 'extraship' ? 'extraship' : 'packitem') : 'order', preset = {}) {
@@ -5669,8 +5826,20 @@ function selectLineType(lineVal) {
     btn.classList.toggle('active', btn.dataset.line === lineVal);
   });
   const isTth = ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(lineVal);
+  const incGoodsChk = document.getElementById('f_includeGoodsInFlow');
+  if (incGoodsChk) incGoodsChk.checked = isTth;
   toggleCnyBox(isTth || parseNum(val('goodsCny')) > 0);
   formDirty = true;
+  updateOrderCalcPreview();
+}
+
+function syncGoodsVndFromCny() {
+  const cny = parseNum(val('goodsCny'));
+  const rateSell = parseNum(val('rateSell'));
+  const vndInp = document.getElementById('f_goodsVndInput');
+  if (vndInp && cny > 0 && rateSell > 0) {
+    vndInp.value = String(Math.round(cny * rateSell));
+  }
   updateOrderCalcPreview();
 }
 
@@ -5863,10 +6032,14 @@ function readDraftOrderFromForm() {
   const id = document.getElementById('recordForm')?.dataset.id || '';
   const prev = (db.orderNotes || []).find(x => x.id === id);
   const lineType = val('lineType') || 'Xách tay';
-  // Bảo toàn dữ liệu lịch sử nếu không đổi Line; nếu người dùng đổi Line thì tính lại theo Line mới
-  const includeGoods = (prev && prev.lineType === lineType && prev.includeGoodsInFlow !== undefined)
-    ? Boolean(prev.includeGoodsInFlow)
-    : ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(lineType);
+  const incGoodsEl = document.getElementById('f_includeGoodsInFlow');
+  const includeGoods = incGoodsEl
+    ? Boolean(incGoodsEl.checked)
+    : ((prev && prev.lineType === lineType && prev.includeGoodsInFlow !== undefined)
+        ? Boolean(prev.includeGoodsInFlow)
+        : ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(lineType));
+  const incShipEl = document.getElementById('f_includeShipInDebt');
+  const includeShipInDebt = incShipEl ? Boolean(incShipEl.checked) : Boolean(prev?.includeShipInDebt);
 
   return {
     id,
@@ -5884,6 +6057,7 @@ function readDraftOrderFromForm() {
     goodsCny: parseNum(val('goodsCny')),
     goodsVndInput: parseNum(val('goodsVndInput')),
     includeGoodsInFlow: includeGoods,
+    includeShipInDebt,
     shipCost: parseNum(val('shipCost')),
     shipCharge: parseNum(val('shipCharge')),
     packagingType: val('packagingType') || packagingTypes[0],
@@ -6095,9 +6269,9 @@ function renderFields(kind, o) {
         </div>
 
         <div id="cnyExchangeBox" class="cny-box ${showCnyBox ? '' : 'hidden'}">
-          ${field('goodsCny', 'Số Tệ (CNY - ¥)', o.goodsCny ?? '', 'decimal', false, false, 'VD: 1000')}
+          ${field('goodsCny', 'Số Tệ (CNY - ¥)', o.goodsCny ?? '', 'decimal', false, false, 'VD: 1000', 'oninput="syncGoodsVndFromCny()"')}
           ${field('rateBuy', 'Tỷ giá tệ thu / gốc (₫)', o.rateBuy ?? '', 'decimal', false, false, 'VD: 3550')}
-          ${field('rateSell', 'Tỷ giá tệ bán / báo khách (₫)', o.rateSell ?? '', 'decimal', false, false, 'VD: 3650')}
+          ${field('rateSell', 'Tỷ giá tệ bán / báo khách (₫)', o.rateSell ?? '', 'decimal', false, false, 'VD: 3650', 'oninput="syncGoodsVndFromCny()"')}
         </div>
 
         <div>
@@ -6109,6 +6283,12 @@ function renderFields(kind, o) {
           ${field('serviceFeePct', 'Phí DV (% giá SP)', o.serviceFeePct ?? 0, 'decimal', false, false, 'VD: 3')}
           ${field('serviceFeeManual', 'Hoặc Phí cố định (₫)', o.serviceFeeManual || '', 'money', false, false, 'Khi % = 0')}
         </div>
+        <div class="check-pills">
+          <label class="check-pill" title="Bật khi shop thu tiền hàng từ khách (Mua hộ / Thanh toán hộ); tắt khi khách tự mua gửi kho">
+            <input type="checkbox" id="f_includeGoodsInFlow" ${(o.includeGoodsInFlow !== undefined ? Boolean(o.includeGoodsInFlow) : ['Thanh toán hộ', 'Mua hộ trọn gói'].includes(line)) ? 'checked' : ''} onchange="updateOrderCalcPreview()">
+            <span>💵 Thu tiền hàng từ khách (Tắt nếu khách tự mua hàng gửi kho)</span>
+          </label>
+        </div>
       </div>
 
       <div class="form-card">
@@ -6116,7 +6296,13 @@ function renderFields(kind, o) {
           <span>3. Cước vận chuyển, Vật tư Đóng gói & Thanh toán</span>
         </div>
         ${field('shipCost', 'Cước vận chuyển gốc trả kho (₫)', o.shipCost ?? '', 'money', false, false, 'VD: 120000')}
-        ${field('shipCharge', 'Cước vận chuyển thu khách (₫) — tính riêng', o.shipCharge ?? '', 'money', false, false, 'VD: 180000 (tách riêng, không gộp vào nợ khách)')}
+        ${field('shipCharge', 'Cước vận chuyển thu khách (₫)', o.shipCharge ?? '', 'money', false, false, 'VD: 80000')}
+        <div class="check-pills">
+          <label class="check-pill" title="Tích chọn nếu khách chưa trả cước và muốn tự động cộng luôn tiền cước vận chuyển vào Phải thu & Công nợ của đơn này">
+            <input type="checkbox" id="f_includeShipInDebt" ${o.includeShipInDebt ? 'checked' : ''} onchange="updateOrderCalcPreview()">
+            <span>🚚 Gộp luôn Cước VC thu khách vào Phải thu &amp; Công nợ đơn này</span>
+          </label>
+        </div>
 
         <div class="order-pack-zone">
           <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
@@ -6262,7 +6448,7 @@ function renderFields(kind, o) {
       ${field('name', 'Tên sản phẩm / Dịch vụ đóng gói', o.name || '', 'text', true, false, 'VD: Hộp gỗ, Carton size M, Chống sốc…')}
       ${field('spec', 'Quy cách hoặc kích thước', o.spec || '', 'text', false, false, 'VD: 40x30x30cm, Cuộn 20 lần dùng…')}
       ${selectField('unit', 'Đơn vị tính', packUnits, o.unit || (cat === 'shock' ? 'Lần sử dụng' : 'Cái'))}
-      ${field('qty', 'Số lượng sử dụng', o.qty ?? 1, 'decimal', true, false, 'VD: 1')}
+      ${field('qty', 'SL dùng lẻ ngoài đơn (Để 0 nếu chỉ lưu bảng giá)', o.qty ?? 0, 'decimal', false, false, 'Để 0 tránh tính trùng khi gắn vào đơn')}
 
       <div class="bulk-calc-box">
         <div style="grid-column:1/-1;font-size:12px;font-weight:700;color:#0284c7">
@@ -6586,12 +6772,12 @@ function saveRecord(e) {
     const stampedNote = stampNote(val('note'), prev?.note || '');
     const history = Array.isArray(prev?.history) ? [...prev.history] : [];
 
-    const existingCust = findExistingCustomer(customer, draft.phone, draft.code);
+    const existingCust = findExistingCustomer(customer, draft.phone, prev ? draft.code : '');
     const item = {
       ...draft,
       id: id || makeId(),
       phone: draft.phone || prev?.phone || existingCust?.phone || '',
-      code: draft.code || prev?.code || existingCust?.code || nextCustomerCode(),
+      code: prev?.code || existingCust?.code || nextCustomerCode(),
       waybill: draft.waybill || prev?.waybill || '',
       sourcePurchaseId: draft.sourcePurchaseId || prev?.sourcePurchaseId || '',
       sourceShipmentId: draft.sourceShipmentId || prev?.sourceShipmentId || '',
@@ -6636,6 +6822,9 @@ function saveRecord(e) {
     }
 
     db.orderNotes = prev ? db.orderNotes.map(x => x.id === id ? item : x) : [item, ...db.orderNotes];
+    if (prev && prev.date !== item.date) {
+      reconcilePaymentRecordsIntegrity();
+    }
     if (!persist()) return;
     closeModal();
     render();
