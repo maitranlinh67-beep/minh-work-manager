@@ -2353,6 +2353,7 @@ tfoot td {
   width: min(650px, 100%);
   max-height: 92vh;
   overflow-y: auto;
+  overflow-x: hidden;
   background: var(--paper);
   border-radius: var(--r-lg);
   border: 1px solid var(--line);
@@ -2428,8 +2429,15 @@ tfoot td {
 .form {
   padding: 16px 22px;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 13px 14px;
+}
+
+.form > div,
+.form-card > div,
+.cny-box > div,
+.pack-box > div {
+  min-width: 0;
 }
 
 .form .full {
@@ -2494,8 +2502,9 @@ textarea {
   border-radius: 8px;
   padding: 14px;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px 14px;
+  min-width: 0;
 }
 
 .form-card-title {
@@ -2531,6 +2540,68 @@ textarea {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+/* Khung Ghi Nợ trực tiếp ngay trong biểu mẫu Note đơn */
+.order-debt-box {
+  grid-column: 1 / -1;
+  background: linear-gradient(135deg, #fff1f2 0%, #fffbeb 100%);
+  border: 1.5px solid #fda4af;
+  border-radius: 9px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.order-debt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.order-debt-head strong {
+  font-size: 13px;
+  font-weight: 800;
+  color: #be123c;
+}
+
+.order-debt-quick-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.order-debt-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 10px 12px;
+}
+
+.order-debt-grid > div {
+  min-width: 0;
+}
+
+.field.debt-input-highlight {
+  background: #ffffff;
+  border: 1.5px solid #fb7185;
+  font-weight: 800;
+  color: #be123c;
+}
+
+.field.debt-input-highlight:focus {
+  border-color: #e11d48;
+  box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.14);
+}
+
+@media (max-width: 640px) {
+  .order-debt-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .pkg-row {

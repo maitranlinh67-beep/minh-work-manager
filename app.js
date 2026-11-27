@@ -620,6 +620,10 @@ function statusSelect(kind, id, current, stages) {
 // ============================================================================
 // AI TỰ ĐỘNG TÍNH TOÁN CHO TỪNG NOTE ĐƠN (MINH BẠCH DÒNG TIỀN)
 // ============================================================================
+function hasManualOrderDebt(o) {
+  return Boolean(o && o.manualDebt !== undefined && o.manualDebt !== null && String(o.manualDebt).trim() !== '');
+}
+
 function calcOrderMetrics(o) {
   if (o.status === 'Đã hủy') {
     return {
@@ -637,10 +641,13 @@ function calcOrderMetrics(o) {
       serviceFee: 0,
       fxProfit: 0,
       extraCost: 0,
+      autoCollectCustomer: 0,
       totalCollectCustomer: 0,
       totalPayout: 0,
       netProfit: 0,
       customerPaid: 0,
+      autoCustomerDebt: 0,
+      hasManualDebt: false,
       customerDebt: 0,
       warehouseDebt: 0,
       partnerDebt: 0
@@ -698,16 +705,19 @@ function calcOrderMetrics(o) {
   // 3. Lãi tệ = Số tệ × (Tỷ giá tệ bán - Tỷ giá tệ thu/gốc) (tự động tính ngay khi có Số tệ, Tỷ giá gốc và Tỷ giá bán)
   const fxProfit = (cny > 0 && rateBuy > 0 && rateSell > 0) ? Math.round(cny * (rateSell - rateBuy)) : 0;
 
-  // 4. Tổng phải thu từ khách (bao gồm phí dịch vụ, đóng gói và cước ship phát sinh liên kết)
-  const totalCollectCustomer = (includeGoods ? finalGoodsVnd : 0) + serviceFee + packCharge + extraShipTotal;
+  // 4. Tổng phải thu từ khách & Khung ghi nợ trực tiếp của đơn
+  const autoCollectCustomer = (includeGoods ? finalGoodsVnd : 0) + serviceFee + packCharge + extraShipTotal;
   const totalPayout = (includeGoods ? baseGoodsCostVnd : 0) + shipCost + packCost + extraCost;
 
-  // 5. Lợi nhuận thực tế của đơn (Cước ship phát sinh là khoản khách trả, không tính vào lợi nhuận mặc định)
+  // 5. Lợi nhuận thực tế của đơn (KHÔNG bị biến đổi khi người dùng nhập Khung Ghi Nợ)
   const netProfit = shipProfit + serviceFee + fxProfit + packProfit - extraCost;
 
-  // 6. Công nợ khách hàng & Công nợ cước kho (Giữ nguyên Đã trả cước kho)
+  // 6. Công nợ khách hàng: nếu nhập số vào Khung Ghi Nợ thì lấy đúng số đó, để trống thì tự tính mặc định
   const customerPaid = Math.round(parseNum(o.customerPaid)) + extraShipPaid;
-  const customerDebt = Math.max(0, totalCollectCustomer - customerPaid);
+  const autoCustomerDebt = Math.max(0, autoCollectCustomer - customerPaid);
+  const hasManualDebt = hasManualOrderDebt(o);
+  const customerDebt = hasManualDebt ? Math.max(0, Math.round(parseNum(o.manualDebt))) : autoCustomerDebt;
+  const totalCollectCustomer = hasManualDebt ? Math.max(autoCollectCustomer, customerPaid + customerDebt) : autoCollectCustomer;
   const warehouseDebt = o.warehousePaid ? 0 : shipCost;
   const partnerDebt = 0;
 
@@ -726,10 +736,13 @@ function calcOrderMetrics(o) {
     serviceFee,
     fxProfit,
     extraCost,
+    autoCollectCustomer,
     totalCollectCustomer,
     totalPayout,
     netProfit,
     customerPaid,
+    autoCustomerDebt,
+    hasManualDebt,
     customerDebt,
     warehouseDebt,
     partnerDebt
@@ -886,8 +899,10 @@ function calcOrderDebtAsOf(o, asOfDate = '') {
   const extraTotalAsOf = linkedExtrasAsOf.reduce((s, x) => s + Math.round(parseNum(x.amount)), 0);
   const extraPaidAsOf = linkedExtrasAsOf.reduce((s, x) => s + getExtraLegacyPaid(x) + getExtraRecordedPaid(x.id, asOfDate), 0);
 
-  const baseCollectWithoutExtra = Math.max(0, m.totalCollectCustomer - m.extraShipTotal);
-  const totalCollectAsOf = baseCollectWithoutExtra + extraTotalAsOf;
+  const baseCollectWithoutExtra = Math.max(0, (m.autoCollectCustomer ?? m.totalCollectCustomer) - m.extraShipTotal);
+  const totalCollectAsOf = m.hasManualDebt
+    ? Math.max(baseCollectWithoutExtra + extraTotalAsOf, (Math.round(parseNum(o.customerPaid)) + m.extraShipPaid) + m.customerDebt)
+    : (baseCollectWithoutExtra + extraTotalAsOf);
   const orderPaidAsOf = getOrderLegacyPaid(o) + getOrderRecordedPaid(o.id, asOfDate);
   const paidAsOf = Math.min(totalCollectAsOf, orderPaidAsOf + extraPaidAsOf);
   return Math.max(0, totalCollectAsOf - paidAsOf);
@@ -2154,10 +2169,12 @@ function settleOrderDebt(id, targetType) {
       }
     });
 
-    const baseTarget = Math.max(0, m.totalCollectCustomer - m.extraShipTotal);
     const prevOrderPaid = Math.round(parseNum(o.customerPaid));
-    const orderDelta = Math.max(0, baseTarget - prevOrderPaid);
+    const orderDelta = Math.max(0, m.customerDebt - extraCollectedNow);
     o.customerPaid = prevOrderPaid + orderDelta;
+    if (hasManualOrderDebt(o)) {
+      o.manualDebt = 0;
+    }
     if (orderDelta > 0) {
       recordPaymentEvent({
         kind: 'order',
@@ -2303,6 +2320,9 @@ function promptPartialDebtPay(kind, id) {
   if (!Array.isArray(target.history)) target.history = [];
   if (kind === 'order') {
     target.customerPaid = Math.round(parseNum(target.customerPaid)) + payAmt;
+    if (hasManualOrderDebt(target)) {
+      target.manualDebt = Math.max(0, Math.round(parseNum(target.manualDebt)) - payAmt);
+    }
     recordPaymentEvent({
       kind: 'order', orderId: target.id, orderCode: target.code || '', customer: target.customer || '',
       amount: payAmt, date: payDate, originDate: target.date,
@@ -3052,7 +3072,8 @@ function copyOrderBillZalo(orderId) {
     m.shipCharge > 0 ? `• Cước vận chuyển (tính riêng): ${money(m.shipCharge)} ₫` : '',
     `👉 Tổng phải thu đơn: ${money(m.totalCollectCustomer)} ₫`,
     `• Đã thanh toán: ${money(m.customerPaid)} ₫`,
-    `• CÒN LẠI CẦN THANH TOÁN: ${money(m.customerDebt)} ₫`
+    `• CÒN LẠI CẦN THANH TOÁN: ${money(m.customerDebt)} ₫`,
+    o.debtNoteText ? `• Ghi chú nợ: ${o.debtNoteText}` : ''
   ].filter(Boolean).join('\n');
   copyTextSafe(lines, `📋 Đã chép phiếu báo khách ${o.customer} — dán gửi Zalo được ngay!`);
 }
@@ -3068,7 +3089,7 @@ function copyCustomerDebtZalo(custKey) {
   unpaidOrders.forEach((o, idx) => {
     const m = calcOrderMetrics(o);
     totalDebt += m.customerDebt;
-    detailLines.push(`${idx + 1}. [${dateText(o.date)}] ${o.product || o.goodsType}${o.platform ? ` (${normalizePlatformName(o.platform)})` : ''}: còn ${money(m.customerDebt)} ₫`);
+    detailLines.push(`${idx + 1}. [${dateText(o.date)}] ${o.product || o.goodsType}${o.platform ? ` (${normalizePlatformName(o.platform)})` : ''}: còn ${money(m.customerDebt)} ₫${o.debtNoteText ? ` (${o.debtNoteText})` : ''}`);
   });
   unpaidManualNotes.forEach(d => {
     const rem = getDebtNoteRemaining(d);
@@ -3181,12 +3202,13 @@ function getOrdersViewData() {
           ${o.status === 'Đã hủy'
             ? `<span class="code">Đã hủy đơn</span>`
             : m.customerDebt > 0
-              ? `<span class="debt-pill owe">Khách nợ ${money(m.customerDebt)} ₫</span>`
+              ? `<span class="debt-pill owe">${m.hasManualDebt ? '📒 Ghi nợ' : 'Khách nợ'} ${money(m.customerDebt)} ₫</span>`
               : m.totalCollectCustomer > 0
                 ? `<span class="debt-pill ok">✓ Đã thu đủ</span>`
                 : `<span class="subline">Chưa nhập phí thu</span>`}
           ${m.warehouseDebt > 0 ? `<span class="debt-pill ware">Chưa trả cước kho ${shortMoney(m.warehouseDebt)}</span>` : `<span class="debt-pill ok">✓ Đã trả cước kho</span>`}
         </div>
+        ${o.debtNoteText ? `<div class="subline" style="color:#be123c;margin-top:3px">📒 ${esc(o.debtNoteText)}</div>` : ''}
       </td>
       <td data-label="Lợi nhuận thực tế">
         <div class="profit-num ${m.netProfit >= 0 ? 'income-color' : 'expense-color'}">${m.netProfit >= 0 ? '+' : ''}${money(m.netProfit)} ₫</div>
@@ -4972,8 +4994,8 @@ function buildUnifiedDebtEntries() {
         uid: `order_${o.id}`,
         kind: 'order',
         id: o.id,
-        sourceLabel: '🧮 Tự ghi từ Note đơn',
-        sourceClass: 'debt-src-order',
+        sourceLabel: m.hasManualDebt ? '📒 Nhập khung nợ đơn' : '🧮 Tự ghi từ Note đơn',
+        sourceClass: m.hasManualDebt ? 'debt-src-manual' : 'debt-src-order',
         customer: o.customer || '',
         phone: o.phone || '',
         code: o.code || '',
@@ -4985,7 +5007,7 @@ function buildUnifiedDebtEntries() {
         warehouseDebt: m.warehouseDebt,
         status: o.status,
         date: o.date || '',
-        note: o.note || '',
+        note: [o.debtNoteText, o.note].filter(Boolean).join(' · '),
         updatedAt: o.updatedAt || '',
         isOldPeriod: origP.id !== curBizP.id,
         periodShort: origP.shortLabel,
@@ -5680,8 +5702,14 @@ function fillFullCustomerPay() {
   const draft = readDraftOrderFromForm();
   const m = calcOrderMetrics(draft);
   const inp = document.getElementById('f_customerPaid');
+  const mDebtInp = document.getElementById('f_manualDebt');
   if (inp) {
-    inp.value = String(Math.max(0, m.totalCollectCustomer - m.extraShipPaid));
+    if (m.hasManualDebt) {
+      inp.value = String(Math.max(0, Math.round(parseNum(draft.customerPaid)) + m.customerDebt));
+      if (mDebtInp) mDebtInp.value = '0';
+    } else {
+      inp.value = String(Math.max(0, m.totalCollectCustomer - m.extraShipPaid));
+    }
     formDirty = true;
     updateOrderCalcPreview();
   }
@@ -5689,11 +5717,50 @@ function fillFullCustomerPay() {
 
 function fillZeroCustomerPayDebt() {
   const inp = document.getElementById('f_customerPaid');
+  const mDebtInp = document.getElementById('f_manualDebt');
   if (inp) {
     inp.value = '0';
+    if (mDebtInp && mDebtInp.value.trim() === '0') mDebtInp.value = '';
     formDirty = true;
     updateOrderCalcPreview();
-    toast('📒 Đã đặt Đã thanh toán = 0 ₫ — khi lưu sẽ tự ghi nợ vào Sổ Ghi Nợ và vẫn hiện ở phần cuối!');
+    if (mDebtInp) mDebtInp.focus();
+  }
+}
+
+function fillOrderDebtWithShip() {
+  const draft = readDraftOrderFromForm();
+  const mAuto = calcOrderMetrics({ ...draft, manualDebt: '' });
+  const baseAmt = mAuto.autoCollectCustomer > 0 ? mAuto.autoCollectCustomer : mAuto.finalGoodsVnd;
+  const suggested = Math.max(0, baseAmt + mAuto.shipCharge - mAuto.customerPaid);
+  const mDebtInp = document.getElementById('f_manualDebt');
+  if (mDebtInp) {
+    mDebtInp.value = String(suggested);
+    formDirty = true;
+    updateOrderCalcPreview();
+    mDebtInp.focus();
+    toast(`📒 Đã điền nợ (Hàng + Cước − Đã trả) = ${money(suggested)} ₫`);
+  }
+}
+
+function fillOrderDebtShipOnly() {
+  const shipCharge = Math.max(0, Math.round(parseNum(val('shipCharge'))));
+  const mDebtInp = document.getElementById('f_manualDebt');
+  if (mDebtInp) {
+    mDebtInp.value = String(shipCharge);
+    formDirty = true;
+    updateOrderCalcPreview();
+    mDebtInp.focus();
+    toast(`📒 Đã điền nợ Cước vận chuyển = ${money(shipCharge)} ₫`);
+  }
+}
+
+function clearOrderManualDebt() {
+  const mDebtInp = document.getElementById('f_manualDebt');
+  if (mDebtInp) {
+    mDebtInp.value = '';
+    formDirty = true;
+    updateOrderCalcPreview();
+    toast('↺ Đã chuyển về chế độ tự động tính nợ mặc định');
   }
 }
 
@@ -5829,6 +5896,8 @@ function readDraftOrderFromForm() {
     rateSell: parseNum(val('rateSell')),
     extraCost: parseNum(val('extraCost')),
     customerPaid: parseNum(val('customerPaid')),
+    manualDebt: val('manualDebt') === '' ? '' : Math.max(0, Math.round(parseNum(val('manualDebt')))),
+    debtNoteText: val('debtNoteText'),
     warehousePaid: Boolean(document.getElementById('f_warehousePaid')?.checked),
     partnerPaid: prev && prev.partnerPaid !== undefined ? Boolean(prev.partnerPaid) : true,
     status: val('status') || orderStages[0],
@@ -5847,6 +5916,17 @@ function updateOrderCalcPreview() {
     vndHint.textContent = (draft.goodsCny > 0 && draft.rateSell > 0)
       ? `Tự động quy đổi: ¥${numFmt(draft.goodsCny)} × ${money(draft.rateSell)} = ${money(m.finalGoodsVnd)} ₫`
       : 'Nhập trực tiếp VND nếu đơn không tính theo tệ';
+  }
+
+  const debtBoxHint = document.getElementById('orderDebtBoxHint');
+  const mDebtInp = document.getElementById('f_manualDebt');
+  if (mDebtInp && !m.hasManualDebt) {
+    mDebtInp.placeholder = `Để trống = Tự tính (${money(m.autoCustomerDebt)} ₫) · Hoặc gõ thẳng số nợ vào đây`;
+  }
+  if (debtBoxHint) {
+    debtBoxHint.innerHTML = m.hasManualDebt
+      ? `Đang dùng số nhập trong khung ghi nợ: <b style="color:#be123c">${money(m.customerDebt)} ₫</b> (bấm "↺ Tự tính" nếu muốn quay về mặc định ${money(m.autoCustomerDebt)} ₫)`
+      : `Đang tự động tính nợ = <b>${money(m.autoCustomerDebt)} ₫</b> · Hoặc bấm <b>⚡ Điền Hàng + Cước</b> / gõ số bất kỳ vào ô trên`;
   }
 
   const posTotal = Math.max(1, Math.max(0, m.shipProfit) + Math.max(0, m.serviceFee) + Math.max(0, m.packProfit) + Math.max(0, m.fxProfit));
@@ -6063,15 +6143,36 @@ function renderFields(kind, o) {
         </div>
 
         <div>
-          <label for="f_customerPaid">Tiền khách đã thanh toán (₫)</label>
+          <label for="f_customerPaid">Tiền khách đã thanh toán / Đã cọc (₫)</label>
           <div class="input-with-btn">
-            <input id="f_customerPaid" class="field" type="text" inputmode="decimal" value="${esc(o.customerPaid ?? '')}" placeholder="0 = Tự động ghi nợ đơn này">
-            <button type="button" class="btn small" onclick="fillZeroCustomerPayDebt()" title="Đặt = 0 để tự động ghi nợ đơn vào Sổ Ghi Nợ">📝 Ghi nợ</button>
+            <input id="f_customerPaid" class="field" type="text" inputmode="decimal" value="${esc(o.customerPaid ?? '')}" placeholder="0 (hoặc số tiền khách cọc)">
             <button type="button" class="btn small primary" onclick="fillFullCustomerPay()">Thu đủ</button>
           </div>
-          <span class="field-hint">Để trống hoặc bấm <b>📝 Ghi nợ</b> → tự ghi nợ vào Sổ Ghi Nợ và vẫn hiện ở phần cuối như bình thường</span>
         </div>
         ${field('extraCost', 'Chi phí phát sinh nội bộ (₫)', o.extraCost || '', 'money', false, false, 'Phụ phí nội bộ nếu có…')}
+
+        <div class="order-debt-box">
+          <div class="order-debt-head">
+            <strong>📒 Khung Ghi Nợ Của Đơn Này (Nhập số nợ trực tiếp hoặc bấm điền nhanh)</strong>
+            <div class="order-debt-quick-btns">
+              <button type="button" class="btn small" onclick="fillOrderDebtWithShip()" title="Tự điền = Tiền hàng + Cước VC thu khách − Đã trả">⚡ Điền Hàng + Cước</button>
+              <button type="button" class="btn small" onclick="fillOrderDebtShipOnly()" title="Tự điền đúng bằng Cước vận chuyển thu khách">⚡ Điền Cước VC</button>
+              <button type="button" class="btn small subtle" onclick="clearOrderManualDebt()" title="Xóa số nhập tay để máy tự tính mặc định">↺ Tự tính</button>
+            </div>
+          </div>
+          <div class="order-debt-grid">
+            <div>
+              <label for="f_manualDebt">Số tiền ghi nợ của đơn (₫) — Gõ vào đây</label>
+              <input id="f_manualDebt" class="field debt-input-highlight" type="text" inputmode="decimal" value="${esc(hasManualOrderDebt(o) ? o.manualDebt : '')}" placeholder="Để trống = Tự tính · Hoặc gõ số nợ (VD: 1.007.340)">
+              <span class="field-hint" id="orderDebtBoxHint">Gõ thẳng số nợ vào khung này — sau khi lưu vẫn hiện ở Sổ Ghi Nợ &amp; phần cuối như bình thường</span>
+            </div>
+            <div>
+              <label for="f_debtNoteText">Nội dung / Ghi chú khoản nợ (Tùy chọn)</label>
+              <input id="f_debtNoteText" class="field" type="text" value="${esc(o.debtNoteText || '')}" placeholder="VD: Nợ tiền hàng + 80k cước về VN…">
+              <span class="field-hint">Hiển thị kèm số nợ ở bảng đơn, Sổ Ghi Nợ &amp; khi chép Zalo báo khách</span>
+            </div>
+          </div>
+        </div>
 
         <div class="check-pills">
           <label class="check-pill">
@@ -6248,6 +6349,8 @@ function describeOrderChanges(prev, next) {
   if ((prev.packagingType || '') !== (next.packagingType || '') || prev.packCharge !== next.packCharge) diffs.push(`Đóng gói: ${next.packagingType} (+${money(next.packCharge)} ₫)`);
   if (prev.rateBuy !== next.rateBuy || prev.rateSell !== next.rateSell || prev.goodsCny !== next.goodsCny) diffs.push('Tệ/Tỷ giá cập nhật');
   if (prev.customerPaid !== next.customerPaid) diffs.push(`Khách trả: ${money(prev.customerPaid)} → ${money(next.customerPaid)} ₫`);
+  if ((prev.manualDebt ?? '') !== (next.manualDebt ?? '')) diffs.push(`Khung ghi nợ: ${hasManualOrderDebt(next) ? money(next.manualDebt) + ' ₫' : 'Tự động'}`);
+  if ((prev.debtNoteText || '') !== (next.debtNoteText || '')) diffs.push('Cập nhật ghi chú nợ');
   if (prev.warehousePaid !== next.warehousePaid) diffs.push(next.warehousePaid ? 'Đã trả kho' : 'Chưa trả kho');
   if ((prev.note || '') !== (next.note || '')) diffs.push('Cập nhật ghi chú');
   return diffs.length ? diffs.join(' · ') : 'Lưu cập nhật thông tin đơn';
@@ -6526,6 +6629,7 @@ function saveRecord(e) {
       prev.goodsCny !== item.goodsCny || prev.goodsVndInput !== item.goodsVndInput ||
       prev.rateBuy !== item.rateBuy || prev.rateSell !== item.rateSell ||
       prev.serviceFeePct !== item.serviceFeePct || prev.serviceFeeManual !== item.serviceFeeManual ||
+      (prev.manualDebt ?? '') !== (item.manualDebt ?? '') ||
       prev.extraCost !== item.extraCost || prev.date !== item.date;
     if (financialEdited) {
       recordClosedPeriodAdjustment(item.date, prev ? 'Sửa số liệu Note đơn kỳ đã chốt' : 'Bổ sung Note đơn vào kỳ đã chốt', `${item.customer} (${item.code})`, changeDesc);
